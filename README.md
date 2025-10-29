@@ -1,11 +1,11 @@
-<table>
-<tr>
-<td>
+<table style="border: none;">
+<tr style="border: none;">
+<td style="border: none; vertical-align: top;">
 
 <img src="https://raw.githubusercontent.com/scribe-works/prompt-scribe/main/docs/assets/logo.png" alt="The Scribe Works Logo" width="200"/>
 
 </td>
-<td>
+<td style="border: none;">
 
 # Prompt Scribe
 
