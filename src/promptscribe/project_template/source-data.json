@@ -1,0 +1,8 @@
+{
+  "status": "ok",
+  "report_id": 12345,
+  "data": {
+    "items_processed": 150,
+    "items_failed": 3
+  }
+}

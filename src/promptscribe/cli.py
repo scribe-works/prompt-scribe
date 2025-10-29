@@ -30,9 +30,14 @@ app = typer.Typer(
 
 @app.command()
 def init(
-    path: Path = typer.Option(
-        ".prompt_scribe",
-        help="The directory to initialize the project in. Will be created if it doesn't exist.",
+    path: Annotated[Path, typer.Argument(
+        help="The directory to initialize the project in. Defaults to '.prompt_scribe' in the current directory."
+    )] = Path(".prompt_scribe"),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Overwrite existing files if the directory is not empty.",
         rich_help_panel="Customization",
     )
 ):
@@ -42,13 +47,22 @@ def init(
     ui.title("Initializing Prompt Scribe project structure...")
     
     base_path = path.resolve()
-    if base_path.exists() and any(base_path.iterdir()):
-        ui.warning(f"Directory '{base_path.name}' already exists and is not empty. Files may be overwritten.")
-    base_path.mkdir(exist_ok=True)
     
+    # For backward compatibility and consistency:
+    # - If the default path (".prompt_scribe") is used, create structure directly in that directory
+    # - If a custom path is specified, create a ".prompt_scribe" subdirectory within that path
+    if path == Path(".prompt_scribe"):
+        project_path = base_path
+    else:
+        project_path = base_path / ".prompt_scribe"
+        base_path.mkdir(exist_ok=True)
+    
+    project_path.mkdir(exist_ok=True)
+    
+    # Create subdirectories unconditionally
     dirs = ["personas", "includes", "templates", "composed_prompts"]
     for d in dirs:
-        (base_path / d).mkdir(exist_ok=True)
+        (project_path / d).mkdir(exist_ok=True)
         
     # Copy template files from the package
     template_files_path = resources.files("promptscribe") / "project_template"
@@ -56,16 +70,25 @@ def init(
     files_to_copy = {
         "prompts.yml": "prompts.yml",
         "master.jinja2": "templates/master.jinja2",
+        "report.jinja2": "templates/report.jinja2",
         "code-reviewer.md": "personas/code-reviewer.md",
         "development-rules.md": "includes/development-rules.md",
+        "source-data.json": "includes/source-data.json",
     }
     
     for source_name, dest_name in files_to_copy.items():
-        source_content = (template_files_path / source_name).read_text(encoding="utf-8")
-        (base_path / dest_name).write_text(source_content, encoding="utf-8")
+        dest_path = project_path / dest_name
+        
+        if dest_path.exists() and not force:
+            ui.info(f"Skipping existing file: {dest_path.relative_to(Path.cwd())}")
+            continue
 
-    ui.success(f"Project initialized at '{base_path}'")
-    ui.info(f"Next steps: customize '{base_path / 'prompts.yml'}' and run 'prompt-scribe compose'")
+        source_content = (template_files_path / source_name).read_text(encoding="utf-8")
+        dest_path.parent.mkdir(exist_ok=True) # Ensure parent dir exists
+        dest_path.write_text(source_content, encoding="utf-8")
+
+    ui.success(f"Project initialized at '{project_path}'")
+    ui.info(f"Next steps: customize '{project_path / 'prompts.yml'}' and run 'prompt-scribe compose'")
 
 
 def _compose_agents(composer: PromptComposer, agent_names: List[str]):
@@ -115,17 +138,26 @@ class ChangeHandler(FileSystemEventHandler):
 @app.command()
 def compose(
     agent_names: Annotated[List[str], typer.Argument(help="Specific agent(s) to compose. If empty, all agents will be composed.")] = None,
+    config_path: Annotated[Path, typer.Option("--config", "-c", help="Path to the prompts.yml configuration file or directory containing the project structure. Defaults to '.prompt_scribe/prompts.yml'. Use this option when your project was initialized in a custom location.")] = Path(".prompt_scribe/prompts.yml"),
     watch: bool = typer.Option(False, "--watch", "-w", help="Watch for file changes and recompose automatically."),
 ):
     """
     Composes final prompt files from templates and includes.
     """
-    config_path = ".prompt_scribe/prompts.yml"
+    # Handle case where user provides a directory path (like 'preview') instead of full config file path
+    resolved_path = config_path.resolve()
+    
+    # If the path is a directory, assume it contains the .prompt_scribe structure
+    if resolved_path.is_dir():
+        config_file_path = resolved_path / ".prompt_scribe" / "prompts.yml"
+    else:
+        config_file_path = resolved_path
+    
     try:
-        composer = PromptComposer(config_path)
+        composer = PromptComposer(str(config_file_path))
     except FileNotFoundError:
-        ui.error(f"Configuration file '{config_path}' not found.")
-        ui.info("Did you forget to run 'prompt-scribe init'?")
+        ui.error(f"Configuration file '{config_file_path}' not found.")
+        ui.info("Did you forget to run 'prompt-scribe init'? You can also specify a custom config path with --config/-c.")
         raise typer.Exit(code=1)
 
     _compose_agents(composer, agent_names or [])

@@ -1,25 +1,61 @@
 # Global settings for all agents
 settings:
-  personas_dir: "personas"
-  includes_dir: "includes"
-  templates_dir: "templates"
+  # The output directory for the composed prompts.
   output_dir: "composed_prompts"
+  # The directory where Jinja2 templates are located.
+  templates_dir: "templates"
+  # A global template to be used by agents that don't specify their own.
+  template: "master.jinja2"
 
-# Map of agents to be composed
+# Global variables available to all agents.
+# These can be overridden by agent-specific variables.
+variables:
+  project_name: "Prompt Scribe"
+  rules_path: "includes/development-rules.md"
+  persona_path: "personas/code-reviewer.md"
+  # Example of an absolute path. Replace with a real path on your system.
+  architecture_doc: "path/to/your/ARCHITECTURE.md"
+
 agents:
-  example-code-reviewer:
-    template: master.jinja2
-    output_file: example_code_reviewer.md
-    persona:
-      file: personas/code-reviewer.md
-    sections:
-      - title: "📜 Key Development Rules"
-        prologue: "These are the mandatory rules and principles for this project."
-        file: includes/development-rules.md
-      - title: "📄 Code Snippet for Review"
-        content: |
-          ```python
-          def hello_world():
-              # This is a sample function for review.
-              print("Hello, Scribe!")
-          ```
+  # --- Example 1: A comprehensive agent using the "Simple Assembler" ---
+  code-reviewer:
+    variables:
+      # This overrides the global 'project_name' for this agent only.
+      project_name: "DocuScribe"
+
+    assembly:
+      # 1. You can include content directly from a file via a variable.
+      - include: persona_path
+      - separator: "---"
+      # 2. You can also have inline content with variable substitution.
+      - content: |
+          You are a senior AI developer for the `${project_name}` project.
+          Your main task is to provide a thorough and constructive code review.
+      - separator: "---"
+      # 3. Use headers and include other files.
+      - h2: "📜 Key Development Rules"
+      - include: rules_path
+      - separator: "---"
+      # 4. Include a file using an absolute path variable.
+      - h2: "📄 Project Architecture"
+      - include: architecture_doc
+
+  # --- Example 2: An agent that uses the GLOBAL template defined in settings ---
+  global-template-agent:
+    # This agent has no 'assembly' or 'template' key, so it falls back
+    # to using the global 'template: master.jinja2' from the settings.
+    output_file: "global_template_example.md"
+    variables:
+      main_title: "Global Template Report"
+      report_type: "daily"
+      data_source_file: "includes/development-rules.md"
+
+  # --- Example 3: An agent that OVERRIDES the global template ---
+  advanced-report-generator:
+    template: "report.jinja2" # This agent provides its own template.
+    # The output path can be relative and go outside the default output_dir.
+    output_file: "../custom_outputs/final_report.txt"
+    variables:
+      report_type: "weekly"
+      # This variable can be used inside the Jinja2 template, for example, to load data.
+      data_source: "includes/source-data.json"

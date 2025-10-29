@@ -18,12 +18,15 @@ Managing large, multi-part prompts for Large Language Models can be messy. You o
 
 ## The Solution
 
-**Prompt Scribe** automates this process. It uses a simple YAML configuration and the powerful Jinja2 templating engine to compose your final prompts from various source files, ready to be used in any LLM chat or API.
+**Prompt Scribe** automates this process. It uses a simple YAML configuration with powerful features like variables, file includes, and two different composition modes to build your final prompts, ready to be used in any LLM chat or API.
 
 ## Key Features
 
--   **Template-Based:** Use Jinja2 templates for maximum flexibility.
--   **Modular:** Split your prompts into reusable parts (personas, includes, rules).
+-   **Declarative & Flexible:** Configure prompts with a clear, intuitive YAML structure.
+-   **Two Composition Modes:**
+    -   **Simple Assembly:** Sequentially build prompts from content blocks, file includes, and headers.
+    -   **Jinja2 Templating:** Use the full power of Jinja2 for complex logic and transformations.
+-   **Variable System:** Define global and agent-specific variables with support for overriding and recursive substitution (`${VAR}`).
 -   **Safe Initialization:** Creates a dedicated `.prompt_scribe/` directory to avoid cluttering your project root.
 -   **Watch Mode:** Automatically recompose prompts when source files change.
 -   **Beautiful CLI:** A clean, helpful command-line interface.
@@ -60,10 +63,10 @@ pip install prompt-scribe
     ```bash
     prompt-scribe compose
     ```
-    This will read `.prompt_scribe/prompts.yml`, process the `example-code-reviewer` agent, and generate the final prompt in `.prompt_scribe/composed_prompts/`.
+    This will read `.prompt_scribe/prompts.yml`, process all defined agents, and generate the final prompts in `.prompt_scribe/composed_prompts/`.
 
 3.  **Use the output:**
-    Open the generated file, copy the content, and paste it into your LLM chat interface.
+    Open the generated files, copy the content, and paste it into your LLM chat interface.
 
 ## Usage
 
@@ -84,38 +87,70 @@ pip install prompt-scribe
 
 ## Configuration (`.prompt_scribe/prompts.yml`)
 
-The `prompts.yml` file is the heart of your project. It resolves all paths relative to its own location.
+The `prompts.yml` file is the heart of your project. It resolves all paths relative to its own location. It supports variables, two different composition modes, and smart output path handling.
 
 ```yaml
 # Global settings for all agents
 settings:
-  personas_dir: "personas"
-  includes_dir: "includes"
-  templates_dir: "templates"
+  # The output directory for the composed prompts.
   output_dir: "composed_prompts"
+  # The directory where Jinja2 templates are located.
+  templates_dir: "templates"
+  # A global template to be used by agents that don't specify their own.
+  template: "master.jinja2"
 
-# Map of agents to be composed
+# Global variables available to all agents.
+# These can be overridden by agent-specific variables.
+variables:
+  project_name: "Prompt Scribe"
+  rules_path: "includes/development-rules.md"
+  persona_path: "personas/code-reviewer.md"
+  # Example of an absolute path. Replace with a real path on your system.
+  architecture_doc: "path/to/your/ARCHITECTURE.md"
+
 agents:
-  example-code-reviewer:
-    # Jinja2 template to use for rendering
-    template: master.jinja2
-    # The final output file name
-    output_file: example_code_reviewer.md
-    # The persona section, available as `persona` in the template
-    persona:
-      file: personas/code-reviewer.md
-    # A list of content sections, available as `sections` in the template
-    sections:
-      - title: "📜 Key Development Rules"
-        prologue: "These are the mandatory rules and principles for this project."
-        file: includes/development-rules.md
-      - title: "📄 Code Snippet for Review"
-        # You can also include content directly
-        content: |
-          ```python
-          def hello_world():
-              print("Hello, Scribe!")
-          ```
+  # --- Example 1: A comprehensive agent using the "Simple Assembler" ---
+  code-reviewer:
+    variables:
+      # This overrides the global 'project_name' for this agent only.
+      project_name: "DocuScribe"
+
+    assembly:
+      # 1. You can include content directly from a file via a variable.
+      - include: persona_path
+      - separator: "---"
+      # 2. You can also have inline content with variable substitution.
+      - content: |
+          You are a senior AI developer for the `${project_name}` project.
+          Your main task is to provide a thorough and constructive code review.
+      - separator: "---"
+      # 3. Use headers and include other files.
+      - h2: "📜 Key Development Rules"
+      - include: rules_path
+      - separator: "---"
+      # 4. Include a file using an absolute path variable.
+      - h2: "📄 Project Architecture"
+      - include: architecture_doc
+
+  # --- Example 2: An agent that uses the GLOBAL template defined in settings ---
+  global-template-agent:
+    # This agent has no 'assembly' or 'template' key, so it falls back
+    # to using the global 'template: master.jinja2' from the settings.
+    output_file: "global_template_example.md"
+    variables:
+      main_title: "Global Template Report"
+      report_type: "daily"
+      data_source_file: "includes/development-rules.md"
+
+  # --- Example 3: An agent that OVERRIDES the global template ---
+  advanced-report-generator:
+    template: "report.jinja2" # This agent provides its own template.
+    # The output path can be relative and go outside the default output_dir.
+    output_file: "../custom_outputs/final_report.txt"
+    variables:
+      report_type: "weekly"
+      # This variable can be used inside the Jinja2 template, for example, to load data.
+      data_source: "includes/source-data.json"
 ```
 
 ## License

@@ -1,17 +1,10 @@
-{{- persona.content -}}
-{%- if sections %}
+# {{ main_title }} ({{ report_type }})
+
+This report was generated using the master Jinja2 template.
+
+## Data Source
+
+The data for this report comes from: `{{ data_source_file }}`.
+
 ---
-{%- endif %}
-{%- for section in sections %}
-
-### {{ section.title }}
-{%- if section.prologue %}
-
-{{ section.prologue }}
-{%- endif %}
-
-{{ section.content }}
-{%- if not loop.last %}
----
-{%- endif %}
-{%- endfor %}
+*This is a generated prompt.*
