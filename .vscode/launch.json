@@ -1,0 +1,36 @@
+{
+  "version": "0.1.0",
+  "configurations": [
+    {
+      "name": "Tailwind CSS Build",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "F:/Cache/docuscribe/tailwindcss/4.1.14/tailwindcss-windows-x64.exe",
+      "args": [
+        "-i",
+        "docuscribe/static/input.css",
+        "-o",
+        "docuscribe/static/style.css"
+      ],
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": false,
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Tailwind CSS Build (Watch)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "F:/Cache/docuscribe/tailwindcss/4.1.14/tailwindcss-windows-x64.exe",
+      "args": [
+        "-i",
+        "docuscribe/static/input.css",
+        "-o",
+        "docuscribe/static/style.css",
+        "--watch"
+      ],
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": false,
+      "console": "integratedTerminal"
+    }
+  ]
+}

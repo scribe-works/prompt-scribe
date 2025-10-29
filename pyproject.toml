@@ -1,0 +1,29 @@
+[project]
+name = "prompt-scribe"
+version = "0.1.0"
+description = "A powerful, template-based prompt composer for crafting and managing complex instructions for LLMs."
+authors = [
+  { name="Plyanter Viktor" }
+]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/TheScribeWorks/prompt-scribe"
+keywords = ["llm", "ai", "prompt-engineering", "developer-tools", "jinja2", "cli"]
+requires-python = ">=3.14"
+dependencies = [
+    "typer (>=0.20.0,<0.21.0)",
+    "pyyaml (>=6.0.3,<7.0.0)",
+    "jinja2 (>=3.1.6,<4.0.0)",
+    "watchdog (>=6.0.0,<7.0.0)",
+    "rich (>=14.2.0,<15.0.0)"
+]
+
+[tool.poetry]
+packages = [{include = "promptscribe", from = "src"}]
+
+[tool.poetry.scripts]
+prompt-scribe = "promptscribe.cli:app"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

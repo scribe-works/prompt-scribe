@@ -1,0 +1,17 @@
+{{- persona.content -}}
+{%- if sections %}
+---
+{%- endif %}
+{%- for section in sections %}
+
+### {{ section.title }}
+{%- if section.prologue %}
+
+{{ section.prologue }}
+{%- endif %}
+
+{{ section.content }}
+{%- if not loop.last %}
+---
+{%- endif %}
+{%- endfor %}

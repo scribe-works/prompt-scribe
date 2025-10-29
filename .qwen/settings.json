@@ -1,0 +1,19 @@
+{
+  "mcp": {
+    "allowed": []
+  },
+  "tools": {
+    "exclude": [
+      "TodoWriteTool"
+    ]
+  },
+  "context": {
+    "fileName": [
+      "ARCHITECTURE.md",
+      "DEVELOPMENT.md",
+      "TOOLS.md",
+      "QWEN.md"
+    ],
+    "loadFromIncludeDirectories": true
+  }
+}

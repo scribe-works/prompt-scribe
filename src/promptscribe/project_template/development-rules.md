@@ -1,0 +1,1 @@
+All code must follow the PEP 8 style guide.

@@ -1,0 +1,1693 @@
+description = "Передает заданный промпт"
+prompt = """
+
+You are an expert Python developer specializing in Scrapy and robust system architecture. Your task is to upgrade an existing Scrapy archiving project based on user feedback after its initial run. The user has identified several key areas for improvement: lack of a virtual environment, noisy logs, no clear progress indicators, and slow performance due to indiscriminate downloading of all assets (CSS, JS, images).
+
+The user also made a critical observation: an "on-the-fly" approach where asset collection is skipped if the parent HTML page is unchanged is **not robust**. It can lead to an inconsistent archive if the process is interrupted after saving the HTML but before all its assets are saved. Therefore, we will implement a more explicit and reliable solution using user-controlled archiving modes.
+
+Here is the current state of the project:
+
+<file_map>
+F:/Projects/scrapy_archive_project
+├── bsfg_archive
+│   ├── spiders
+│   │   ├── __init__.py
+│   │   └── bsfg_spider.py
+│   ├── __init__.py
+│   ├── items.py
+│   ├── middlewares.py
+│   ├── pipelines.py
+│   └── settings.py
+├── tests
+│   ├── __init__.py
+│   ├── conftest.py
+│   ├── test_items.py
+│   ├── test_pipelines.py
+│   ├── test_run_archive.py
+│   ├── test_spider.py
+│   └── test_utils.py
+├── .gitignore
+├── README.md
+├── requirements-test.txt
+├── requirements.txt
+├── run_archive.py
+├── run_tests.py
+└── scrapy.cfg
+
+</file_map>
+
+<file_contents>
+File: F:/Projects/scrapy_archive_project/tests/test_pipelines.py
+```python
+import os
+import json
+import pytest
+from datetime import datetime
+from unittest.mock import Mock
+import tempfile
+import shutil
+from bsfg_archive.pipelines import VersioningArchivePipeline
+from bsfg_archive.items import ArchiveItem
+from tests.test_utils import create_test_content, create_test_manifest, write_test_manifest
+
+class TestVersioningArchivePipeline:
+    @pytest.fixture
+    def pipeline(self, temp_archive_dir):
+        \"\"\"Create a pipeline instance with a temporary archive directory.\"\"\"
+        pipeline = VersioningArchivePipeline()
+        pipeline.archive_path = temp_archive_dir
+        pipeline.objects_path = os.path.join(temp_archive_dir, 'objects')
+        pipeline.snapshots_path = os.path.join(temp_archive_dir, 'snapshots')
+        pipeline.manifest_path = os.path.join(temp_archive_dir, 'manifest.json')
+        return pipeline
+
+    @pytest.fixture
+    def spider(self):
+        \"\"\"Create a mock spider.\"\"\"
+        return Mock()
+
+    def test_init(self, pipeline):
+        \"\"\"Test pipeline initialization.\"\"\"
+        assert pipeline.archive_path is not None
+        assert pipeline.objects_path is not None
+        assert pipeline.snapshots_path is not None
+        assert pipeline.manifest_path is not None
+        assert pipeline.manifest == {}
+
+    def test_open_spider_creates_directories(self, pipeline, spider):
+        \"\"\"Test that open_spider creates required directories.\"\"\"
+        pipeline.open_spider(spider)
+        
+        assert os.path.exists(pipeline.objects_path)
+        assert os.path.exists(pipeline.snapshots_path)
+        assert os.path.isdir(pipeline.objects_path)
+        assert os.path.isdir(pipeline.snapshots_path)
+
+    def test_open_spider_loads_existing_manifest(self, pipeline, spider):
+        \"\"\"Test that open_spider loads existing manifest.\"\"\"
+        # Create a test manifest
+        url = "https://example.com/test.html"
+        content, content_hash = create_test_content()
+        manifest_data = create_test_manifest(url, content_hash)
+        write_test_manifest(pipeline.manifest_path, manifest_data)
+        
+        # Open spider should load the manifest
+        pipeline.open_spider(spider)
+        
+        assert url in pipeline.manifest
+        assert len(pipeline.manifest[url]) == 1
+        assert pipeline.manifest[url][0]['hash'] == content_hash
+
+    def test_process_item_new_content(self, pipeline, spider):
+        \"\"\"Test processing a new item with unique content.\"\"\"
+        pipeline.open_spider(spider)
+        
+        url = "https://example.com/test.html"
+        content, content_hash = create_test_content("unique content")
+        item = ArchiveItem(
+            url=url,
+            body=content
+        )
+        
+        # Process the item
+        result = pipeline.process_item(item, spider)
+        
+        # Check that the item is returned unchanged
+        assert result == item
+        
+        # Check that the manifest was updated
+        assert url in pipeline.manifest
+        assert len(pipeline.manifest[url]) == 1
+        assert pipeline.manifest[url][0]['hash'] == content_hash
+        
+        # Check that the object was saved
+        object_path = os.path.join(pipeline.objects_path, content_hash[:2], content_hash)
+        assert os.path.exists(object_path)
+        
+        # Check the content of the saved object
+        with open(object_path, 'rb') as f:
+            saved_content = f.read()
+        assert saved_content == content
+
+    def test_process_item_duplicate_content(self, pipeline, spider):
+        \"\"\"Test processing an item with content that already exists.\"\"\"
+        pipeline.open_spider(spider)
+        
+        url1 = "https://example.com/page1.html"
+        url2 = "https://example.com/page2.html"
+        content, content_hash = create_test_content("same content")
+        
+        # Process first item
+        item1 = ArchiveItem(
+            url=url1,
+            body=content
+        )
+        pipeline.process_item(item1, spider)
+        
+        # Process second item with same content
+        item2 = ArchiveItem(
+            url=url2,
+            body=content
+        )
+        pipeline.process_item(item2, spider)
+        
+        # Both URLs should be in manifest
+        assert url1 in pipeline.manifest
+        assert url2 in pipeline.manifest
+        
+        # Both should point to the same hash
+        assert pipeline.manifest[url1][0]['hash'] == content_hash
+        assert pipeline.manifest[url2][0]['hash'] == content_hash
+        
+        # Object should only exist once
+        object_path = os.path.join(pipeline.objects_path, content_hash[:2], content_hash)
+        assert os.path.exists(object_path)
+        
+        # Count files in objects directory (should be just one)
+        object_files = []
+        for root, dirs, files in os.walk(pipeline.objects_path):
+            for file in files:
+                object_files.append(os.path.join(root, file))
+        
+        assert len(object_files) == 1
+
+    def test_process_item_same_url_updated_content(self, pipeline, spider):
+        \"\"\"Test processing the same URL with updated content.\"\"\"
+        pipeline.open_spider(spider)
+        
+        url = "https://example.com/test.html"
+        
+        # Process first version
+        content1, content_hash1 = create_test_content("version 1")
+        item1 = ArchiveItem(
+            url=url,
+            body=content1
+        )
+        pipeline.process_item(item1, spider)
+        
+        # Process second version
+        content2, content_hash2 = create_test_content("version 2")
+        item2 = ArchiveItem(
+            url=url,
+            body=content2
+        )
+        pipeline.process_item(item2, spider)
+        
+        # URL should have two versions in manifest
+        assert url in pipeline.manifest
+        assert len(pipeline.manifest[url]) == 2
+        assert pipeline.manifest[url][0]['hash'] == content_hash1
+        assert pipeline.manifest[url][1]['hash'] == content_hash2
+        
+        # Both objects should exist
+        object_path1 = os.path.join(pipeline.objects_path, content_hash1[:2], content_hash1)
+        object_path2 = os.path.join(pipeline.objects_path, content_hash2[:2], content_hash2)
+        assert os.path.exists(object_path1)
+        assert os.path.exists(object_path2)
+
+    def test_process_item_same_content_no_duplication(self, pipeline, spider):
+        \"\"\"Test that identical content for the same URL doesn't create duplicates.\"\"\"
+        pipeline.open_spider(spider)
+        
+        url = "https://example.com/test.html"
+        content, content_hash = create_test_content("same content")
+        
+        # Process the same item twice
+        item = ArchiveItem(
+            url=url,
+            body=content
+        )
+        pipeline.process_item(item, spider)
+        pipeline.process_item(item, spider)
+        
+        # Should only have one entry in manifest
+        assert url in pipeline.manifest
+        assert len(pipeline.manifest[url]) == 1
+        assert pipeline.manifest[url][0]['hash'] == content_hash
+
+    def test_close_spider_saves_manifest(self, pipeline, spider):
+        \"\"\"Test that close_spider saves the manifest.\"\"\"
+        pipeline.open_spider(spider)
+        
+        # Add some data to manifest
+        url = "https://example.com/test.html"
+        content, content_hash = create_test_content()
+        pipeline.manifest[url] = [{
+            "timestamp": datetime.utcnow().isoformat(),
+            "hash": content_hash
+        }]
+        
+        # Close spider should save manifest
+        pipeline.close_spider(spider)
+        
+        # Check that manifest file exists
+        assert os.path.exists(pipeline.manifest_path)
+        
+        # Check that manifest file contains correct data
+        with open(pipeline.manifest_path, 'r', encoding='utf-8') as f:
+            saved_manifest = json.load(f)
+        
+        assert url in saved_manifest
+        assert saved_manifest[url][0]['hash'] == content_hash
+
+    def test_create_snapshot(self, pipeline, spider):
+        \"\"\"Test snapshot creation.\"\"\"
+        pipeline.open_spider(spider)
+        
+        # Add some data to manifest
+        url1 = "https://example.com/page1.html"
+        url2 = "https://example.com/page2.html"
+        content1, content_hash1 = create_test_content("content 1")
+        content2, content_hash2 = create_test_content("content 2")
+        
+        pipeline.manifest[url1] = [{
+            "timestamp": datetime.utcnow().isoformat(),
+            "hash": content_hash1
+        }]
+        
+        pipeline.manifest[url2] = [{
+            "timestamp": datetime.utcnow().isoformat(),
+            "hash": content_hash2
+        }]
+        
+        # Create snapshot
+        pipeline.create_snapshot(spider)
+        
+        # Check that snapshot file was created
+        snapshot_files = os.listdir(pipeline.snapshots_path)
+        assert len(snapshot_files) == 1
+        
+        # Check snapshot content
+        snapshot_path = os.path.join(pipeline.snapshots_path, snapshot_files[0])
+        with open(snapshot_path, 'r', encoding='utf-8') as f:
+            snapshot = json.load(f)
+        
+        assert snapshot[url1] == content_hash1
+        assert snapshot[url2] == content_hash2
+```
+
+File: F:/Projects/scrapy_archive_project/tests/test_run_archive.py
+```python
+import os
+import json
+import pytest
+from unittest.mock import patch, Mock
+import tempfile
+import shutil
+import requests
+import subprocess
+import sys
+from run_archive import get_url_content_hash, get_last_hash_from_manifest, run_spider
+
+class TestRunArchive:
+    @pytest.fixture
+    def temp_dir(self):
+        \"\"\"Create a temporary directory for testing.\"\"\"
+        temp_dir = tempfile.mkdtemp()
+        yield temp_dir
+        shutil.rmtree(temp_dir)
+
+    @patch('run_archive.requests.get')
+    def test_get_url_content_hash_success(self, mock_get):
+        \"\"\"Test get_url_content_hash with successful response.\"\"\"
+        # Mock the response
+        mock_response = Mock()
+        mock_response.content = b"test content"
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+        
+        # Test the function
+        result = get_url_content_hash("https://example.com/test")
+        
+        # Verify the result
+        expected_hash = "6ae8a75555209fd6c44157c0aed8016e763ff435a19cf186f76863140143ff72"
+        assert result == expected_hash
+        
+        # Verify the mock was called correctly
+        mock_get.assert_called_once_with("https://example.com/test", timeout=15)
+
+    @patch('run_archive.requests.get')
+    def test_get_url_content_hash_request_exception(self, mock_get):
+        \"\"\"Test get_url_content_hash with request exception.\"\"\"
+        # Mock an exception
+        mock_get.side_effect = requests.RequestException("Network error")
+        
+        # Test the function
+        result = get_url_content_hash("https://example.com/test")
+        
+        # Should return None on exception
+        assert result is None
+
+    def test_get_last_hash_from_manifest_no_file(self):
+        \"\"\"Test get_last_hash_from_manifest when manifest file doesn't exist.\"\"\"
+        result = get_last_hash_from_manifest("https://example.com/test")
+        assert result is None
+
+    def test_get_last_hash_from_manifest_empty_manifest(self, temp_dir):
+        \"\"\"Test get_last_hash_from_manifest with empty manifest.\"\"\"
+        # Create an empty manifest file
+        manifest_path = os.path.join(temp_dir, 'manifest.json')
+        with open(manifest_path, 'w') as f:
+            json.dump({}, f)
+        
+        # Patch the MANIFEST_PATH
+        with patch('run_archive.MANIFEST_PATH', manifest_path):
+            result = get_last_hash_from_manifest("https://example.com/test")
+            assert result is None
+
+    def test_get_last_hash_from_manifest_url_not_found(self, temp_dir):
+        \"\"\"Test get_last_hash_from_manifest when URL is not in manifest.\"\"\"
+        # Create a manifest with a different URL
+        manifest_data = {
+            "https://example.com/other": [
+                {"hash": "abc123", "timestamp": "2023-01-01T00:00:00"}
+            ]
+        }
+        
+        manifest_path = os.path.join(temp_dir, 'manifest.json')
+        with open(manifest_path, 'w') as f:
+            json.dump(manifest_data, f)
+        
+        # Patch the MANIFEST_PATH
+        with patch('run_archive.MANIFEST_PATH', manifest_path):
+            result = get_last_hash_from_manifest("https://example.com/test")
+            assert result is None
+
+    def test_get_last_hash_from_manifest_success(self, temp_dir):
+        \"\"\"Test get_last_hash_from_manifest with successful retrieval.\"\"\"
+        # Create a manifest with the URL
+        manifest_data = {
+            "https://example.com/test": [
+                {"hash": "abc123", "timestamp": "2023-01-01T00:00:00"},
+                {"hash": "def456", "timestamp": "2023-01-02T00:00:00"}
+            ]
+        }
+        
+        manifest_path = os.path.join(temp_dir, 'manifest.json')
+        with open(manifest_path, 'w') as f:
+            json.dump(manifest_data, f)
+        
+        # Patch the MANIFEST_PATH
+        with patch('run_archive.MANIFEST_PATH', manifest_path):
+            result = get_last_hash_from_manifest("https://example.com/test")
+            assert result == "def456"  # Should return the last hash
+
+    @patch('run_archive.subprocess.run')
+    def test_run_spider_success(self, mock_run):
+        \"\"\"Test run_spider with successful execution.\"\"\"
+        mock_run.return_value = Mock()
+        
+        # Test the function
+        run_spider(skip_coords=True)
+        
+        # Verify the subprocess was called correctly
+        expected_command = [sys.executable, '-m', 'scrapy', 'crawl', 'bsfg', '-a', 'skip_coordinates=True']
+        mock_run.assert_called_once_with(expected_command, check=True)
+
+    @patch('run_archive.subprocess.run')
+    def test_run_spider_called_process_error(self, mock_run):
+        \"\"\"Test run_spider with CalledProcessError.\"\"\"
+        mock_run.side_effect = subprocess.CalledProcessError(1, "cmd")
+        
+        # Test the function (should not raise)
+        run_spider(skip_coords=False)
+        
+        # Verify the subprocess was called
+        expected_command = [sys.executable, '-m', 'scrapy', 'crawl', 'bsfg', '-a', 'skip_coordinates=False']
+        mock_run.assert_called_once_with(expected_command, check=True)
+```
+
+File: F:/Projects/scrapy_archive_project/tests/test_spider.py
+```python
+import pytest
+from unittest.mock import Mock, patch
+from scrapy.http import HtmlResponse, Request
+from scrapy import Selector
+from bsfg_archive.spiders.bsfg_spider import BsfgSpider
+
+class TestBsfgSpider:
+    @pytest.fixture
+    def spider(self):
+        \"\"\"Create a spider instance.\"\"\"
+        return BsfgSpider()
+
+    def test_spider_initialization(self, spider):
+        \"\"\"Test spider initialization.\"\"\"
+        assert spider.name == "bsfg"
+        assert spider.allowed_domains == ["db.bsfg.ru"]
+        assert spider.start_urls == ["https://db.bsfg.ru/"]
+        assert spider.skip_coordinates is False
+
+    def test_spider_initialization_with_skip_coordinates(self):
+        \"\"\"Test spider initialization with skip_coordinates parameter.\"\"\"
+        spider = BsfgSpider(skip_coordinates=True)
+        assert spider.skip_coordinates is True
+        
+        spider = BsfgSpider(skip_coordinates=False)
+        assert spider.skip_coordinates is False
+        
+        # Test string values
+        spider = BsfgSpider(skip_coordinates='true')
+        assert spider.skip_coordinates is True
+        
+        spider = BsfgSpider(skip_coordinates='false')
+        assert spider.skip_coordinates is False
+
+    def test_parse_non_html_content(self, spider):
+        \"\"\"Test parsing non-HTML content.\"\"\"
+        url = "https://db.bsfg.ru/style.css"
+        body = b"body { color: red; }"
+        response = HtmlResponse(url=url, body=body, headers={'Content-Type': 'text/css'})
+        
+        items = list(spider.parse(response))
+        
+        assert len(items) == 1
+        item = items[0]
+        assert item['url'] == url
+        assert item['body'] == body
+        assert item['content_type'] == 'text/css'
+
+    def test_parse_html_content_creates_requests(self, spider):
+        \"\"\"Test that HTML content creates requests for linked resources.\"\"\"
+        url = "https://db.bsfg.ru/index.html"
+        body = b\"\"\"
+        <html>
+        <head>
+            <link rel="stylesheet" href="style.css">
+        </head>
+        <body>
+            <a href="/page1.html">Page 1</a>
+            <a href="https://external.com/page2.html">External Page</a>
+            <script src="script.js"></script>
+            <img src="image.png" alt="Test image">
+        </body>
+        </html>
+        \"\"\"
+        response = HtmlResponse(url=url, body=body, headers={'Content-Type': 'text/html'})
+        
+        results = list(spider.parse(response))
+        
+        # Should have one item for the page itself
+        items = [r for r in results if hasattr(r, 'fields') or (isinstance(r, dict) and 'body' in r)]
+        assert len(items) == 1
+        item = items[0]
+        assert item['url'] == url
+        assert 'text/html' in item['content_type']
+
+    def test_create_request_skip_coordinates(self):
+        \"\"\"Test that create_request respects skip_coordinates flag.\"\"\"
+        # Test with skip_coordinates=True
+        spider = BsfgSpider(skip_coordinates=True)
+        response = Mock()
+        response.url = "https://db.bsfg.ru/"
+        
+        # This should return None (no request created)
+        request = spider.create_request(response, "/map/?x=10&y=20")
+        assert request is None
+        
+        # Test with skip_coordinates=False
+        spider = BsfgSpider(skip_coordinates=False)
+        request = spider.create_request(response, "/map/?x=10&y=20")
+        assert request is not None
+        assert isinstance(request, Request)
+
+    def test_create_request_external_domain(self, spider):
+        \"\"\"Test that create_request filters out external domains.\"\"\"
+        response = Mock()
+        response.url = "https://db.bsfg.ru/"
+        
+        # This should return None (no request created)
+        request = spider.create_request(response, "https://external.com/page.html")
+        assert request is None
+
+    def test_create_request_internal_domain(self, spider):
+        \"\"\"Test that create_request allows internal domains.\"\"\"
+        response = Mock()
+        response.url = "https://db.bsfg.ru/"
+        
+        # This should return a Request object
+        request = spider.create_request(response, "/page.html")
+        assert request is not None
+        assert isinstance(request, Request)
+        assert request.url == "https://db.bsfg.ru/page.html"
+```
+
+File: F:/Projects/scrapy_archive_project/bsfg_archive/settings.py
+```python
+# Scrapy settings for bsfg_archive project
+#
+# For simplicity, this file contains only settings considered important or
+# commonly used. You can find more settings consulting the documentation:
+#
+#     https://docs.scrapy.org/en/latest/topics/settings.html
+#     https://docs.scrapy.org/en/latest/topics/downloader-middleware.html
+#     https://docs.scrapy.org/en/latest/topics/spider-middleware.html
+
+BOT_NAME = "bsfg_archive"
+
+SPIDER_MODULES = ["bsfg_archive.spiders"]
+NEWSPIDER_MODULE = "bsfg_archive.spiders"
+
+ADDONS = {}
+
+
+# Crawl responsibly by identifying yourself (and your website) on the user-agent
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+
+# Obey robots.txt rules
+ROBOTSTXT_OBEY = False
+
+# Concurrency and throttling settings
+CONCURRENT_REQUESTS = 1
+CONCURRENT_REQUESTS_PER_DOMAIN = 1
+DOWNLOAD_DELAY = 1
+
+# Enable cookies (enabled by default)
+COOKIES_ENABLED = True
+COOKIES_DEBUG = True
+
+# Disable Telnet Console (enabled by default)
+TELNETCONSOLE_ENABLED = False
+
+# Override the default request headers:
+DEFAULT_REQUEST_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+# Enable or disable spider middlewares
+# See https://docs.scrapy.org/en/latest/topics/spider-middleware.html
+#SPIDER_MIDDLEWARES = {
+#    "bsfg_archive.middlewares.BsfgArchiveSpiderMiddleware": 543,
+#}
+
+# Enable or disable downloader middlewares
+# See https://docs.scrapy.org/en/latest/topics/downloader-middleware.html
+#DOWNLOADER_MIDDLEWARES = {
+#    "bsfg_archive.middlewares.BsfgArchiveDownloaderMiddleware": 543,
+#}
+
+# Enable or disable extensions
+# See https://docs.scrapy.org/en/latest/topics/extensions.html
+#EXTENSIONS = {
+#    "scrapy.extensions.telnet.TelnetConsole": None,
+#}
+
+# Configure item pipelines
+# See https://docs.scrapy.org/en/latest/topics/item-pipeline.html
+ITEM_PIPELINES = {
+    "bsfg_archive.pipelines.VersioningArchivePipeline": 300,
+}
+
+# Enable and configure the AutoThrottle extension (disabled by default)
+# See https://docs.scrapy.org/en/latest/topics/autothrottle.html
+AUTOTHROTTLE_ENABLED = True
+# The initial download delay
+AUTOTHROTTLE_START_DELAY = 1
+# The maximum download delay to be set in case of high latencies
+AUTOTHROTTLE_MAX_DELAY = 10
+# The average number of requests Scrapy should be sending in parallel to
+# each remote server
+AUTOTHROTTLE_TARGET_CONCURRENCY = 1.0
+# Enable showing throttling stats for every response received:
+AUTOTHROTTLE_DEBUG = False
+
+# Enable and configure HTTP caching (disabled by default)
+# See https://docs.scrapy.org/en/latest/topics/downloader-middleware.html#httpcache-middleware-settings
+# HTTPCACHE_ENABLED = True
+# HTTPCACHE_EXPIRATION_SECS = 0
+# HTTPCACHE_DIR = "httpcache"
+# HTTPCACHE_IGNORE_HTTP_CODES = []
+# HTTPCACHE_STORAGE = "scrapy.extensions.httpcache.FilesystemCacheStorage"
+
+# Set settings whose default value is deprecated to a future-proof value
+FEED_EXPORT_ENCODING = "utf-8"
+
+# Custom settings for our archiving spider
+DEPTH_LIMIT = 0  # No depth limit
+
+# Custom settings for versioned archiving
+ARCHIVE_PATH = 'archive'
+
+```
+
+File: F:/Projects/scrapy_archive_project/bsfg_archive/middlewares.py
+```python
+# Define here the models for your spider middleware
+#
+# See documentation in:
+# https://docs.scrapy.org/en/latest/topics/spider-middleware.html
+
+from scrapy import signals
+
+# useful for handling different item types with a single interface
+from itemadapter import ItemAdapter
+
+
+class BsfgArchiveSpiderMiddleware:
+    # Not all methods need to be defined. If a method is not defined,
+    # scrapy acts as if the spider middleware does not modify the
+    # passed objects.
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        # This method is used by Scrapy to create your spiders.
+        s = cls()
+        crawler.signals.connect(s.spider_opened, signal=signals.spider_opened)
+        return s
+
+    def process_spider_input(self, response, spider):
+        # Called for each response that goes through the spider
+        # middleware and into the spider.
+
+        # Should return None or raise an exception.
+        return None
+
+    def process_spider_output(self, response, result, spider):
+        # Called with the results returned from the Spider, after
+        # it has processed the response.
+
+        # Must return an iterable of Request, or item objects.
+        for i in result:
+            yield i
+
+    def process_spider_exception(self, response, exception, spider):
+        # Called when a spider or process_spider_input() method
+        # (from other spider middleware) raises an exception.
+
+        # Should return either None or an iterable of Request or item objects.
+        pass
+
+    async def process_start(self, start):
+        # Called with an async iterator over the spider start() method or the
+        # maching method of an earlier spider middleware.
+        async for item_or_request in start:
+            yield item_or_request
+
+    def spider_opened(self, spider):
+        spider.logger.info("Spider opened: %s" % spider.name)
+
+
+class BsfgArchiveDownloaderMiddleware:
+    # Not all methods need to be defined. If a method is not defined,
+    # scrapy acts as if the downloader middleware does not modify the
+    # passed objects.
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        # This method is used by Scrapy to create your spiders.
+        s = cls()
+        crawler.signals.connect(s.spider_opened, signal=signals.spider_opened)
+        return s
+
+    def process_request(self, request, spider):
+        # Called for each request that goes through the downloader
+        # middleware.
+
+        # Must either:
+        # - return None: continue processing this request
+        # - or return a Response object
+        # - or return a Request object
+        # - or raise IgnoreRequest: process_exception() methods of
+        #   installed downloader middleware will be called
+        return None
+
+    def process_response(self, request, response, spider):
+        # Called with the response returned from the downloader.
+
+        # Must either;
+        # - return a Response object
+        # - return a Request object
+        # - or raise IgnoreRequest
+        return response
+
+    def process_exception(self, request, exception, spider):
+        # Called when a download handler or a process_request()
+        # (from other downloader middleware) raises an exception.
+
+        # Must either:
+        # - return None: continue processing this exception
+        # - return a Response object: stops process_exception() chain
+        # - return a Request object: stops process_exception() chain
+        pass
+
+    def spider_opened(self, spider):
+        spider.logger.info("Spider opened: %s" % spider.name)
+
+```
+
+File: F:/Projects/scrapy_archive_project/bsfg_archive/pipelines.py
+```python
+import os
+import json
+import hashlib
+from datetime import datetime
+from scrapy.utils.project import get_project_settings
+
+class VersioningArchivePipeline:
+    def __init__(self):
+        self.settings = get_project_settings()
+        self.archive_path = self.settings.get('ARCHIVE_PATH', 'archive')
+        self.objects_path = os.path.join(self.archive_path, 'objects')
+        self.snapshots_path = os.path.join(self.archive_path, 'snapshots')
+        self.manifest_path = os.path.join(self.archive_path, 'manifest.json')
+        self.manifest = {}
+
+    def open_spider(self, spider):
+        os.makedirs(self.objects_path, exist_ok=True)
+        os.makedirs(self.snapshots_path, exist_ok=True)
+        if os.path.exists(self.manifest_path):
+            with open(self.manifest_path, 'r', encoding='utf-8') as f:
+                self.manifest = json.load(f)
+        spider.logger.info(f"Архив инициализирован в '{self.archive_path}'")
+
+    def close_spider(self, spider):
+        # Сохраняем итоговый манифест
+        with open(self.manifest_path, 'w', encoding='utf-8') as f:
+            json.dump(self.manifest, f, ensure_ascii=False, indent=2)
+        
+        # Создаем новый слепок состояния
+        self.create_snapshot(spider)
+        spider.logger.info("Манифест обновлен и новый слепок создан.")
+
+    def process_item(self, item, spider):
+        url = item['url']
+        content = item['body']
+        
+        content_hash = hashlib.sha256(content).hexdigest()
+        
+        last_version = self.manifest.get(url, [])
+        last_hash = last_version[-1]['hash'] if last_version else None
+        
+        if content_hash == last_hash:
+            # Контент не изменился, пропускаем
+            return item
+
+        spider.logger.info(f"Обнаружена новая версия для URL: {url}")
+
+        # Сохраняем новый объект контента, если его еще нет
+        object_dir = os.path.join(self.objects_path, content_hash[:2])
+        os.makedirs(object_dir, exist_ok=True)
+        object_path = os.path.join(object_dir, content_hash)
+        
+        if not os.path.exists(object_path):
+            with open(object_path, 'wb') as f:
+                f.write(content)
+        
+        # Обновляем историю в манифесте
+        new_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "hash": content_hash
+        }
+        if url not in self.manifest:
+            self.manifest[url] = []
+        self.manifest[url].append(new_entry)
+        
+        return item
+
+    def create_snapshot(self, spider):
+        snapshot = {}
+        for url, history in self.manifest.items():
+            if history:
+                snapshot[url] = history[-1]['hash']
+        
+        timestamp = datetime.utcnow().strftime('%Y-%m-%dT%H-%M-%S')
+        snapshot_filename = f"{timestamp}.json"
+        snapshot_path = os.path.join(self.snapshots_path, snapshot_filename)
+        
+        with open(snapshot_path, 'w', encoding='utf-8') as f:
+            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+```
+
+File: F:/Projects/scrapy_archive_project/run_archive.py
+```python
+import os
+import json
+import hashlib
+import requests
+import subprocess
+import sys
+from datetime import datetime
+
+ARCHIVE_PATH = 'archive'
+MANIFEST_PATH = os.path.join(ARCHIVE_PATH, 'manifest.json')
+MAP_GUARDIAN_URL = 'https://db.bsfg.ru/map/'
+
+def get_url_content_hash(url):
+    \"\"\"Скачивает URL и возвращает его SHA256 хэш.\"\"\"
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        return hashlib.sha256(response.content).hexdigest()
+    except Exception as e:
+        print(f"Ошибка: не удалось скачать '{url}'. Причина: {e}")
+        return None
+
+def get_last_hash_from_manifest(url):
+    \"\"\"Получает последний известный хэш для URL из манифеста.\"\"\"
+    if not os.path.exists(MANIFEST_PATH):
+        return None
+    with open(MANIFEST_PATH, 'r', encoding='utf-8') as f:
+        manifest = json.load(f)
+    history = manifest.get(url)
+    if history:
+        return history[-1]['hash']
+    return None
+
+def run_spider(skip_coords=False):
+    \"\"\"Запускает Scrapy паука с нужными параметрами.\"\"\"
+    print(f"Запуск паука Scrapy (skip_coordinates={skip_coords})...")
+    
+    # Use the module approach which is more reliable
+    command = [sys.executable, '-m', 'scrapy', 'crawl', 'bsfg', '-a', f'skip_coordinates={skip_coords}']
+    try:
+        subprocess.run(command, check=True)
+        print("Работа паука успешно завершена.")
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"Ошибка при запуске Scrapy: {e}")
+        print("Убедитесь, что Scrapy установлен.")
+
+if __name__ == "__main__":
+    print("--- Запуск системы версионируемого архивирования ---")
+    
+    # 1. Логика "стража" для карты
+    print(f"Проверка изменений на странице-страже: {MAP_GUARDIAN_URL}")
+    new_map_hash = get_url_content_hash(MAP_GUARDIAN_URL)
+    last_map_hash = get_last_hash_from_manifest(MAP_GUARDIAN_URL)
+
+    skip_coordinates_mode = False
+    if new_map_hash and new_map_hash == last_map_hash:
+        print("Страница-страж не изменилась. Включаю режим пропуска координат.")
+        skip_coordinates_mode = True
+    elif not new_map_hash:
+        print("Не удалось проверить страницу-страж. Запуск в полном режиме.")
+    else:
+        print("Обнаружены изменения на странице-страже или это первый запуск. Запуск в полном режиме.")
+
+    # 2. Запуск паука
+    run_spider(skip_coords=skip_coordinates_mode)
+    
+    print("--- Процесс архивирования завершен ---")
+```
+
+File: F:/Projects/scrapy_archive_project/README.md
+```markdown
+# Версионируемый архив сайта db.bsfg.ru
+
+Этот проект использует Scrapy для создания полной, версионируемой архивной копии сайта https://db.bsfg.ru/. Система отслеживает изменения на страницах и эффективно хранит только уникальный контент.
+
+## Архитектура
+
+- **Content-Addressable Storage**: Каждый уникальный файл (HTML, CSS, JS) сохраняется только один раз в директории `archive/objects/`. Имя файла - это его SHA256 хэш.
+- **Манифест**: Файл `archive/manifest.json` хранит историю изменений для каждого URL, связывая его с хэшами контента в разные моменты времени.
+- **Слепки (Snapshots)**: В директории `archive/snapshots/` создаются JSON-файлы, представляющие собой "слепок" состояния всего сайта на момент завершения архивации.
+
+## Установка
+
+1.  Убедитесь, что у вас установлен Python 3.7 или выше.
+2.  Установите основные зависимости:
+    ```bash
+    pip install -r requirements.txt
+    ```
+3.  (Опционально) Установите зависимости для тестирования:
+    ```bash
+    pip install -r requirements-test.txt
+    ```
+
+## Запуск архивирования
+
+Для запуска процесса архивации используйте управляющий скрипт:
+
+```bash
+python run_archive.py
+```
+
+Скрипт автоматически определит, нужно ли сканировать ресурсоемкие разделы сайта (например, координаты на карте), основываясь на изменениях ключевых страниц.
+
+## Тестирование
+
+Проект включает полный набор тестов для всех компонентов. Для запуска тестов:
+
+1.  Установите зависимости для тестирования (если еще не установлены):
+    ```bash
+    pip install -r requirements-test.txt
+    ```
+
+2.  Запустите тесты одним из способов:
+    
+    a. Используя pytest напрямую:
+    ```bash
+    python -m pytest tests/ -v
+    ```
+    
+    b. Используя встроенный скрипт:
+    ```bash
+    python run_tests.py
+    ```
+
+3.  Для запуска тестов с отчетом о покрытии:
+    ```bash
+    python -m pytest tests/ --cov=bsfg_archive --cov-report=html
+    ```
+
+## Результаты
+
+Весь архив будет сохранен в директории `archive/`
+```
+
+File: F:/Projects/scrapy_archive_project/bsfg_archive/spiders/bsfg_spider.py
+```python
+import scrapy
+from urllib.parse import urljoin
+from bsfg_archive.items import ArchiveItem
+
+class BsfgSpider(scrapy.Spider):
+    name = "bsfg"
+    allowed_domains = ["db.bsfg.ru"]
+    start_urls = ["https://db.bsfg.ru/"]
+
+    def __init__(self, skip_coordinates=False, *args, **kwargs):
+        super(BsfgSpider, self).__init__(*args, **kwargs)
+        self.skip_coordinates = str(skip_coordinates).lower() == 'true'
+        if self.skip_coordinates:
+            self.logger.info("Режим пропуска координат включен.")
+
+    def parse(self, response):
+        content_type = response.headers.get('Content-Type', b'').decode('utf-8')
+        
+        yield ArchiveItem(
+            url=response.url,
+            body=response.body,
+            content_type=content_type
+        )
+
+        if 'text/html' in content_type:
+            # Ищем ссылки на другие страницы и ресурсы
+            # 1. Ссылки <a>
+            for href in response.css('a::attr(href)').getall():
+                yield self.create_request(response, href)
+
+            # 2. Скрипты <script>
+            for src in response.css('script::attr(src)').getall():
+                yield self.create_request(response, src)
+
+            # 3. Стили <link>
+            for href in response.css('link[rel="stylesheet"]::attr(href)').getall():
+                yield self.create_request(response, href)
+
+            # 4. Изображения <img>
+            for src in response.css('img::attr(src)').getall():
+                yield self.create_request(response, src)
+
+    def create_request(self, response, link):
+        absolute_url = urljoin(response.url, link)
+        
+        # Проверяем, нужно ли пропустить ссылку на карту
+        if self.skip_coordinates and '/map/?' in absolute_url:
+            return None # Не создаем запрос
+            
+        # Проверяем, что ссылка принадлежит разрешенному домену
+        if self.allowed_domains[0] in absolute_url:
+            return scrapy.Request(absolute_url, callback=self.parse)
+        
+        return None
+```
+
+File: F:/Projects/scrapy_archive_project/.gitignore
+```gitignore
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# celery beat schedule file
+celerybeat-schedule
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+Thumbs.db
+.DS_Store
+
+# Project specific
+downloaded_pages/
+bsfg_archive.zip
+archive/
+```
+
+File: F:/Projects/scrapy_archive_project/tests/test_items.py
+```python
+import pytest
+from bsfg_archive.items import ArchiveItem
+
+def test_archive_item_creation():
+    \"\"\"Test creating an ArchiveItem with all fields.\"\"\"
+    url = "https://example.com/test.html"
+    body = b"<html><body>Test content</body></html>"
+    content_type = "text/html"
+    
+    item = ArchiveItem(
+        url=url,
+        body=body,
+        content_type=content_type
+    )
+    
+    assert item['url'] == url
+    assert item['body'] == body
+    assert item['content_type'] == content_type
+
+def test_archive_item_partial_fields():
+    \"\"\"Test creating an ArchiveItem with only required fields.\"\"\"
+    url = "https://example.com/test.css"
+    body = b"body { color: red; }"
+    
+    item = ArchiveItem(
+        url=url,
+        body=body
+    )
+    
+    assert item['url'] == url
+    assert item['body'] == body
+    # content_type should be None or not present
+    assert item.get('content_type') is None
+```
+
+File: F:/Projects/scrapy_archive_project/tests/test_utils.py
+```python
+import os
+import json
+import hashlib
+from datetime import datetime
+
+def create_test_content(content_str="test content"):
+    \"\"\"Create test content with a hash.\"\"\"
+    content = content_str.encode('utf-8')
+    content_hash = hashlib.sha256(content).hexdigest()
+    return content, content_hash
+
+def create_test_manifest(url, content_hash, timestamp=None):
+    \"\"\"Create a test manifest entry.\"\"\"
+    if timestamp is None:
+        timestamp = datetime.utcnow().isoformat()
+    
+    return {
+        url: [
+            {
+                "timestamp": timestamp,
+                "hash": content_hash
+            }
+        ]
+    }
+
+def write_test_manifest(manifest_path, manifest_data):
+    \"\"\"Write manifest data to a file.\"\"\"
+    os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+    with open(manifest_path, 'w', encoding='utf-8') as f:
+        json.dump(manifest_data, f, ensure_ascii=False, indent=2)
+```
+
+File: F:/Projects/scrapy_archive_project/run_tests.py
+```python
+#!/usr/bin/env python3
+\"\"\"
+Simple test script to verify the setup works correctly.
+\"\"\"
+
+import os
+import sys
+import subprocess
+
+def run_tests():
+    \"\"\"Run the test suite.\"\"\"
+    print("Running tests...")
+    try:
+        # Run pytest with coverage
+        result = subprocess.run([
+            sys.executable, "-m", "pytest", 
+            "--cov=bsfg_archive", 
+            "--cov-report=term-missing",
+            "-v"
+        ], check=True)
+        print("All tests passed!")
+        return True
+    except subprocess.CalledProcessError:
+        print("Some tests failed!")
+        return False
+
+if __name__ == "__main__":
+    success = run_tests()
+    sys.exit(0 if success else 1)
+```
+
+File: F:/Projects/scrapy_archive_project/tests/conftest.py
+```python
+import sys
+import os
+import pytest
+import tempfile
+import shutil
+
+# Add the project root to the Python path so we can import modules
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+@pytest.fixture
+def temp_archive_dir():
+    \"\"\"Create a temporary directory for archive operations.\"\"\"
+    temp_dir = tempfile.mkdtemp()
+    yield temp_dir
+    shutil.rmtree(temp_dir)
+```
+
+File: F:/Projects/scrapy_archive_project/scrapy.cfg
+```ini
+# Automatically created by: scrapy startproject
+#
+# For more information about the [deploy] section see:
+# https://scrapyd.readthedocs.io/en/latest/deploy.html
+
+[settings]
+default = bsfg_archive.settings
+
+[deploy]
+#url = http://localhost:6800/
+project = bsfg_archive
+
+```
+
+File: F:/Projects/scrapy_archive_project/bsfg_archive/items.py
+```python
+import scrapy
+
+class ArchiveItem(scrapy.Item):
+    \"\"\"Универсальный Item для любого архивируемого контента.\"\"\"
+    url = scrapy.Field()
+    body = scrapy.Field()
+    content_type = scrapy.Field()
+```
+
+File: F:/Projects/scrapy_archive_project/bsfg_archive/spiders/__init__.py
+```python
+# This package will contain the spiders of your Scrapy project
+#
+# Please refer to the documentation for information on how to create and manage
+# your spiders.
+
+```
+
+File: F:/Projects/scrapy_archive_project/requirements-test.txt
+```text
+pytest>=6.0
+pytest-cov>=2.10
+mock>=4.0
+```
+
+File: F:/Projects/scrapy_archive_project/requirements.txt
+```text
+scrapy==2.13.3
+requests
+```
+
+File: F:/Projects/scrapy_archive_project/bsfg_archive/__init__.py
+```python
+
+```
+
+File: F:/Projects/scrapy_archive_project/tests/__init__.py
+```python
+
+```
+
+</file_contents>
+
+---
+### **ЗАДАЧА**
+
+Выполните следующие шаги для улучшения проекта:
+
+**1. Настройте `bsfg_archive/settings.py` для улучшения логирования.**
+- Установите `LOG_LEVEL = 'INFO'`, чтобы убрать из лога отладочную информацию с содержимым файлов.
+- Добавьте `LOG_STATS_INTERVAL = 60`, чтобы Scrapy выводил статистику о прогрессе каждую минуту.
+
+**2. Обновите `bsfg_archive/pipelines.py` для вывода итоговой статистики.**
+- В `__init__` добавьте счетчики `self.stats = {'new': 0, 'skipped': 0}`.
+- В `process_item` инкрементируйте `self.stats['skipped']` или `self.stats['new']` в зависимости от того, изменился ли контент.
+- В `close_spider` выведите в лог итоговые значения этих счетчиков.
+
+**3. Увеличьте надежность паука в `bsfg_archive/spiders/bsfg_spider.py`.**
+- Замените `start_urls` на метод `start_requests`, который будет принудительно ставить в очередь и главную страницу, и страницу-стража (`/map/`) в самом начале. Это гарантирует, что хэш стража будет сохранен даже при коротком сеансе.
+
+**4. Реализуйте режимы архивации (главное изменение).**
+- **В `run_archive.py`:**
+    - Используйте модуль `argparse` для добавления аргумента командной строки `--mode` с вариантами `full`, `no_assets`, `quick`.
+    - Измените логику: если `mode == 'quick'`, `skip_coordinates_mode` принудительно `True`. В остальных случаях решение принимает "страж".
+    - Передавайте выбранный `mode` в Scrapy-паука как параметр.
+- **В `bsfg_spider.py`:**
+    - В `__init__` примите и сохраните параметр `mode`.
+    - В методе `parse` измените логику: ссылки `<a>` парсятся всегда, а ссылки на ресурсы (`script`, `link`, `img`) — **только если `self.mode == 'full'`**.
+
+**5. Обновите документацию `README.md`.**
+- Добавьте раздел о необходимости создания и активации виртуального окружения (`venv`).
+- Объясните, как удалить глобально установленные пакеты и установить их в `venv`.
+- Опишите новые режимы запуска (`--mode full`, `--mode no_assets`, `--mode quick`).
+
+---
+### **РЕАЛИЗАЦИЯ**
+
+**1. Замените содержимое `bsfg_archive/settings.py` на:**
+```python
+# ... (все существующие настройки) ...
+
+# Custom settings for our archiving spider
+DEPTH_LIMIT = 0  # No depth limit
+
+# Custom settings for versioned archiving
+ARCHIVE_PATH = 'archive'
+
+# Logging settings for better user experience
+LOG_LEVEL = 'INFO'
+LOG_STATS_INTERVAL = 60
+```
+
+**2. Замените содержимое `bsfg_archive/pipelines.py` на:**
+```python
+import os
+import json
+import hashlib
+from datetime import datetime
+from scrapy.utils.project import get_project_settings
+
+class VersioningArchivePipeline:
+    def __init__(self):
+        self.settings = get_project_settings()
+        self.archive_path = self.settings.get('ARCHIVE_PATH', 'archive')
+        self.objects_path = os.path.join(self.archive_path, 'objects')
+        self.snapshots_path = os.path.join(self.archive_path, 'snapshots')
+        self.manifest_path = os.path.join(self.archive_path, 'manifest.json')
+        self.manifest = {}
+        self.stats = {'new': 0, 'skipped': 0}
+
+    def open_spider(self, spider):
+        os.makedirs(self.objects_path, exist_ok=True)
+        os.makedirs(self.snapshots_path, exist_ok=True)
+        if os.path.exists(self.manifest_path):
+            with open(self.manifest_path, 'r', encoding='utf-8') as f:
+                self.manifest = json.load(f)
+        spider.logger.info(f"Архив инициализирован в '{self.archive_path}'")
+
+    def close_spider(self, spider):
+        # Сохраняем итоговый манифест
+        with open(self.manifest_path, 'w', encoding='utf-8') as f:
+            json.dump(self.manifest, f, ensure_ascii=False, indent=2)
+        
+        self.create_snapshot(spider)
+        spider.logger.info("Манифест обновлен и новый слепок создан.")
+        
+        spider.logger.info("--- Итоговая статистика сеанса ---")
+        spider.logger.info(f"Обнаружено новых/измененных файлов: {self.stats['new']}")
+        spider.logger.info(f"Пропущено неизмененных файлов: {self.stats['skipped']}")
+        spider.logger.info("----------------------------------")
+
+    def process_item(self, item, spider):
+        url = item['url']
+        content = item['body']
+        
+        content_hash = hashlib.sha256(content).hexdigest()
+        
+        last_version = self.manifest.get(url, [])
+        last_hash = last_version[-1]['hash'] if last_version else None
+        
+        if content_hash == last_hash:
+            self.stats['skipped'] += 1
+            return item
+
+        self.stats['new'] += 1
+        spider.logger.info(f"Новая версия: {url}")
+
+        # Сохраняем новый объект контента, если его еще нет
+        object_dir = os.path.join(self.objects_path, content_hash[:2])
+        os.makedirs(object_dir, exist_ok=True)
+        object_path = os.path.join(object_dir, content_hash)
+        
+        if not os.path.exists(object_path):
+            with open(object_path, 'wb') as f:
+                f.write(content)
+        
+        # Обновляем историю в манифесте
+        new_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "hash": content_hash
+        }
+        if url not in self.manifest:
+            self.manifest[url] = []
+        self.manifest[url].append(new_entry)
+        
+        return item
+
+    def create_snapshot(self, spider):
+        snapshot = {}
+        for url, history in self.manifest.items():
+            if history:
+                snapshot[url] = history[-1]['hash']
+        
+        timestamp = datetime.utcnow().strftime('%Y-%m-%dT%H-%M-%S')
+        snapshot_filename = f"{timestamp}.json"
+        snapshot_path = os.path.join(self.snapshots_path, snapshot_filename)
+        
+        with open(snapshot_path, 'w', encoding='utf-8') as f:
+            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+```
+
+**3. Замените содержимое `bsfg_archive/spiders/bsfg_spider.py` на:**
+```python
+import scrapy
+from urllib.parse import urljoin
+from bsfg_archive.items import ArchiveItem
+
+class BsfgSpider(scrapy.Spider):
+    name = "bsfg"
+    allowed_domains = ["db.bsfg.ru"]
+
+    def __init__(self, skip_coordinates=False, mode='full', *args, **kwargs):
+        super(BsfgSpider, self).__init__(*args, **kwargs)
+        self.skip_coordinates = str(skip_coordinates).lower() == 'true'
+        self.mode = mode
+        if self.skip_coordinates:
+            self.logger.info("Режим пропуска координат карты включен.")
+        self.logger.info(f"Паук запущен в режиме архивации: '{self.mode}'")
+
+    def start_requests(self):
+        # Гарантируем, что эти URL будут запрошены в самом начале
+        initial_urls = [
+            "https://db.bsfg.ru/",
+            "https://db.bsfg.ru/map/" # Страница-страж
+        ]
+        for url in initial_urls:
+            yield scrapy.Request(url, callback=self.parse)
+
+    def parse(self, response):
+        content_type = response.headers.get('Content-Type', b'').decode('utf-8')
+        
+        yield ArchiveItem(
+            url=response.url,
+            body=response.body,
+            content_type=content_type
+        )
+
+        if 'text/html' in content_type:
+            # Ссылки <a> (другие HTML страницы) ищем всегда
+            for href in response.css('a::attr(href)').getall():
+                yield self.create_request(response, href)
+
+            # Ресурсы (ассеты) ищем только в режиме 'full'
+            if self.mode == 'full':
+                for src in response.css('script::attr(src)').getall():
+                    yield self.create_request(response, src)
+
+                for href in response.css('link[rel="stylesheet"]::attr(href)').getall():
+                    yield self.create_request(response, href)
+
+                for src in response.css('img::attr(src)').getall():
+                    yield self.create_request(response, src)
+
+    def create_request(self, response, link):
+        if not link or link.startswith('javascript:') or link.startswith('mailto:'):
+            return None
+            
+        absolute_url = urljoin(response.url, link)
+        
+        if self.skip_coordinates and '/map/?' in absolute_url:
+            return None
+            
+        if self.allowed_domains in absolute_url:
+            return scrapy.Request(absolute_url, callback=self.parse)
+        
+        return None
+```
+
+**4. Замените содержимое `run_archive.py` на:**
+```python
+import os
+import json
+import hashlib
+import requests
+import subprocess
+import sys
+import argparse
+from datetime import datetime
+
+ARCHIVE_PATH = 'archive'
+MANIFEST_PATH = os.path.join(ARCHIVE_PATH, 'manifest.json')
+MAP_GUARDIAN_URL = 'https://db.bsfg.ru/map/'
+
+def get_url_content_hash(url):
+    \"\"\"Скачивает URL и возвращает его SHA256 хэш.\"\"\"
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        return hashlib.sha256(response.content).hexdigest()
+    except requests.RequestException as e:
+        print(f"Ошибка: не удалось скачать '{url}'. Причина: {e}")
+        return None
+
+def get_last_hash_from_manifest(url):
+    \"\"\"Получает последний известный хэш для URL из манифеста.\"\"\"
+    if not os.path.exists(MANIFEST_PATH):
+        return None
+    try:
+        with open(MANIFEST_PATH, 'r', encoding='utf-8') as f:
+            manifest = json.load(f)
+        history = manifest.get(url)
+        if history:
+            return history[-1]['hash']
+    except (json.JSONDecodeError, KeyError):
+        return None
+    return None
+
+def run_spider(skip_coords=False, mode='full'):
+    \"\"\"Запускает Scrapy паука с нужными параметрами.\"\"\"
+    print(f"Запуск паука Scrapy (skip_coordinates={skip_coords}, mode={mode})...")
+    
+    command = [sys.executable, '-m', 'scrapy', 'crawl', 'bsfg', '-a', f'skip_coordinates={skip_coords}', '-a', f'mode={mode}']
+    try:
+        subprocess.run(command, check=True)
+        print("Работа паука успешно завершена.")
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"Ошибка при запуске Scrapy: {e}")
+        print("Убедитесь, что Scrapy установлен и вы находитесь в активированном виртуальном окружении.")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Система версионируемого архивирования сайта db.bsfg.ru.")
+    parser.add_argument(
+        '--mode', 
+        type=str, 
+        default='full', 
+        choices=['full', 'no_assets', 'quick'],
+        help="Режим архивации: full - всё; no_assets - только HTML; quick - только HTML и без координат карты."
+    )
+    args = parser.parse_args()
+
+    print(f"--- Запуск системы в режиме: {args.mode} ---")
+    
+    skip_coordinates_mode = False
+    
+    if args.mode == 'quick':
+        print("Режим 'quick': принудительно пропускаем координаты карты.")
+        skip_coordinates_mode = True
+    else:
+        print(f"Проверка изменений на странице-страже: {MAP_GUARDIAN_URL}")
+        new_map_hash = get_url_content_hash(MAP_GUARDIAN_URL)
+        last_map_hash = get_last_hash_from_manifest(MAP_GUARDIAN_URL)
+
+        if new_map_hash and new_map_hash == last_map_hash:
+            print("Страница-страж не изменилась. Включаю режим пропуска координат.")
+            skip_coordinates_mode = True
+        elif not new_map_hash:
+            print("Не удалось проверить страницу-стража. Запуск в полном режиме.")
+        else:
+            print("Обнаружены изменения на странице-страже или это первый запуск. Запуск в полном режиме.")
+
+    run_spider(skip_coords=skip_coordinates_mode, mode=args.mode)
+    
+    print("--- Процесс архивирования завершен ---")
+```
+
+**5. Замените содержимое `README.md` на:**
+```markdown
+# Версионируемый архив сайта db.bsfg.ru
+
+Этот проект использует Scrapy для создания полной, версионируемой архивной копии сайта https://db.bsfg.ru/. Система отслеживает изменения на страницах и эффективно хранит только уникальный контент.
+
+## Первоначальная настройка
+
+### 1. Настройка виртуального окружения (Обязательно!)
+
+Работа в виртуальном окружении (`venv`) изолирует зависимости проекта и предотвращает конфликты.
+
+```bash
+# 1. Создайте venv (нужно сделать только один раз)
+python -m venv venv
+
+# 2. Активируйте venv (нужно делать каждый раз в новой сессии терминала)
+# Windows (Command Prompt / PowerShell)
+.\\venv\\Scripts\\activate
+# Linux / macOS
+source venv/bin/activate
+```
+
+### 2. Установка зависимостей
+
+Если у вас были глобально установлены пакеты `scrapy` и `requests`, удалите их, чтобы избежать путаницы:
+```bash
+pip uninstall scrapy requests
+```
+
+Теперь, находясь в **активированном** виртуальном окружении, установите зависимости проекта:
+```bash
+pip install -r requirements.txt
+```
+
+## Запуск архивирования
+
+Для запуска процесса архивации используйте управляющий скрипт `run_archive.py`. Он предоставляет несколько режимов для гибкого управления процессом.
+
+**Режимы запуска:**
+
+1.  **Полный режим (по умолчанию):**
+    Сканирует все HTML страницы и все ресурсы (CSS, JS, изображения). Автоматически пропускает координаты карты, если базовая страница карты не изменилась.
+    ```bash
+    python run_archive.py
+    # или явно
+    python run_archive.py --mode full
+    ```
+
+2.  **Без ресурсов (`no_assets`):**
+    Сканирует только HTML страницы. Идеально для быстрого обновления текстового контента без затрат времени на ресурсы.
+    ```bash
+    python run_archive.py --mode no_assets
+    ```
+
+3.  **Быстрый режим (`quick`):**
+    Самый быстрый режим. Сканирует только HTML страницы и принудительно пропускает все URL, связанные с координатами карты.
+    ```bash
+    python run_archive.py --mode quick
+    ```
+
+## Результаты
+
+Весь архив будет сохранен в директории `archive/`.
+```
+"""

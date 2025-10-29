@@ -1,0 +1,9 @@
+{  
+  "context": {
+    "fileName": ["GEMINI.md", "ARCHITECTURE.md", "DEVELOPMENT.md", "TOOLS.md"],
+    "includeDirectories": [
+      "preview"
+    ]
+  },
+  "allowMCPServers": []
+}

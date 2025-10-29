@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "allowed": []
+  },
+  "context": {
+    "fileName": [
+      "GEMINI.md",
+      "ARCHITECTURE.md",
+      "DEVELOPMENT.md",
+      "TOOLS.md"
+    ]
+  }
+}
