@@ -1,6 +1,6 @@
 # Prompt Scribe
 
-![The Scribe Works Logo](https://raw.githubusercontent.com/scribe-works/prompt-scribe/main/docs/assets/logo.png){width=200}
+<img src="https://raw.githubusercontent.com/scribe-works/prompt-scribe/main/docs/assets/logo.png" alt="The Scribe Works Logo" width="200"/>
 
 A powerful, template-based prompt composer for crafting and managing complex instructions for LLMs.
 
