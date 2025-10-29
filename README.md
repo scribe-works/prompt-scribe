@@ -1,8 +1,19 @@
-# Prompt Scribe
+<table>
+<tr>
+<td>
 
 <img src="https://raw.githubusercontent.com/scribe-works/prompt-scribe/main/docs/assets/logo.png" alt="The Scribe Works Logo" width="200"/>
 
+</td>
+<td>
+
+# Prompt Scribe
+
 A powerful, template-based prompt composer for crafting and managing complex instructions for LLMs.
+
+</td>
+</tr>
+</table>
 
 ---
 
