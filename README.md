@@ -1,19 +1,13 @@
-<table style="border: none;">
-<tr style="border: none;">
-<td style="border: none; vertical-align: top;">
-
+<div style="display: flex; align-items: center; gap: 20px;">
 <img src="https://raw.githubusercontent.com/scribe-works/prompt-scribe/main/docs/assets/logo.png" alt="The Scribe Works Logo" width="200"/>
-
-</td>
-<td style="border: none;">
+<div>
 
 # Prompt Scribe
 
 A powerful, template-based prompt composer for crafting and managing complex instructions for LLMs.
 
-</td>
-</tr>
-</table>
+</div>
+</div>
 
 ---
 
