@@ -1,13 +1,14 @@
-<div style="display: flex; align-items: center; gap: 20px;">
-<img src="https://raw.githubusercontent.com/scribe-works/prompt-scribe/main/docs/assets/logo.png" alt="The Scribe Works Logo" width="200"/>
-<div>
-
-# Prompt Scribe
-
-A powerful, template-based prompt composer for crafting and managing complex instructions for LLMs.
-
-</div>
-</div>
+<table>
+  <tr>
+    <td align="center" style="border: none; padding: 0;">
+      <img src="https://raw.githubusercontent.com/scribe-works/prompt-scribe/main/docs/assets/logo.png" alt="The Scribe Works Logo" width="200"/>
+    </td>
+    <td style="border: none; padding: 0; vertical-align: middle;">
+      <h1>Prompt Scribe</h1>
+      <p>A powerful, template-based prompt composer for crafting and managing complex instructions for LLMs.</p>
+    </td>
+  </tr>
+</table>
 
 ---
 
