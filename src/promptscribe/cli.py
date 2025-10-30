@@ -157,8 +157,18 @@ class ChangeHandler(FileSystemEventHandler):
         settings = self.composer.config.get("settings", {})
         output_dir_str = settings.get("output_dir", "composed_prompts")
         self.output_path = self.composer._resolve_path(output_dir_str)
+        self.reverse_dependencies = self.composer.get_reverse_dependencies()
+        
+        # Debouncing mechanism to prevent multiple rapid recomposition triggers
+        self.last_event_time = 0
+        self.debounce_interval = 0.5  # seconds
     
     def on_any_event(self, event):
+        current_time = time.time()
+        if (current_time - self.last_event_time) < self.debounce_interval:
+            return # Ignore event if it's too soon after the last one
+        self.last_event_time = current_time
+
         if event.is_directory or event.event_type not in ['modified', 'created', 'deleted']:
             return
         
@@ -169,9 +179,62 @@ class ChangeHandler(FileSystemEventHandler):
 
         ui.info(f"Change detected in '{src_path.relative_to(Path.cwd())}'. Recomposing...")
         try:
-            # Re-create composer to reload the config if it changed
-            fresh_composer = PromptComposer(str(self.composer.config_path))
-            _compose_agents(fresh_composer, self.agent_names)
+            if src_path == self.composer.config_path:
+                ui.info("prompts.yml changed. Analyzing for selective recomposition.")
+                
+                # 1. Запоминаем старый конфиг
+                old_config = self.composer.config 
+
+                # 2. Загружаем новый и создаем новый композитор
+                fresh_composer = PromptComposer(str(self.composer.config_path))
+                new_config = fresh_composer.config
+
+                # 3. Определяем, что пересобирать
+                agents_to_rebuild = set()
+
+                # 4. Анализ изменений
+                # Сначала проверяем глобальные изменения, которые требуют полной пересборки
+                if old_config.get('settings') != new_config.get('settings') or \
+                   old_config.get('variables') != new_config.get('variables'):
+                    
+                    ui.info("Global settings or variables changed. Recomposing all agents.")
+                    agents_to_rebuild = set(fresh_composer.get_all_agent_names())
+
+                else:
+                    # Если глобальные секции не тронуты, ищем изменения в агентах
+                    old_agents = old_config.get('agents', {})
+                    new_agents = new_config.get('agents', {})
+                    
+                    # Находим всех агентов, которые были добавлены, удалены или изменены
+                    all_agent_keys = set(old_agents.keys()) | set(new_agents.keys())
+                    
+                    for agent_name in all_agent_keys:
+                        if old_agents.get(agent_name) != new_agents.get(agent_name):
+                            agents_to_rebuild.add(agent_name)
+                    
+                    if agents_to_rebuild:
+                        ui.info(f"Detected changes in agents: {', '.join(agents_to_rebuild)}. Recomposing them.")
+                    else:
+                        ui.info("No effective changes detected in agent configurations.")
+
+                # 5. Выполняем пересборку
+                if agents_to_rebuild:
+                    _compose_agents(fresh_composer, list(agents_to_rebuild))
+
+                # 6. Обновляем состояние
+                self.reverse_dependencies = fresh_composer.get_reverse_dependencies()
+                self.composer = fresh_composer
+
+            else:
+                affected_agents = self.reverse_dependencies.get(src_path)
+                if affected_agents:
+                    ui.info(f"Recomposing affected agents: {', '.join(affected_agents)}")
+                    # Re-create composer to reload the config if it changed (e.g., variables in prompts.yml)
+                    fresh_composer = PromptComposer(str(self.composer.config_path))
+                    _compose_agents(fresh_composer, affected_agents)
+                    # No need to update reverse_dependencies or self.composer here, as prompts.yml didn't change
+                else:
+                    ui.info(f"No agents depend on '{src_path.relative_to(Path.cwd())}'. Skipping recomposition.")
         except Exception as e:
             ui.error(f"An error occurred during recomposition: {e}")
 

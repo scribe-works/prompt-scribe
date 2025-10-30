@@ -41,6 +41,7 @@ class PromptComposer:
             raise PromptScribeError(f"Configuration file not found at '{self.config_path}'")
         self.base_dir = self.config_path.parent
         self.config = self._load_config()
+        self.dependencies: Dict[str, set] = {}  # agent -> {file_path}
 
     def _load_config(self) -> Dict[str, Any]:
         """Loads and validates the main YAML configuration file."""
@@ -66,10 +67,12 @@ class PromptComposer:
             return path
         return (self.base_dir / path).resolve()
 
-    def _read_file_content(self, file_path_str: str) -> str:
-        """Reads content from a file, handling potential errors."""
+    def _read_file_content(self, file_path_str: str, agent_name: str) -> str:
+        """Reads content from a file, handling potential errors and recording dependencies."""
         try:
             file_path = self._resolve_path(file_path_str)
+            if agent_name and agent_name in self.dependencies:
+                self.dependencies[agent_name].add(file_path)
             return file_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             ui.warning(f"File not found during substitution: '{file_path_str}'")
@@ -126,13 +129,14 @@ class PromptComposer:
 
         return pattern.sub(replacer, text)
 
-    def _run_simple_assembly(self, agent_config: dict, variables: dict) -> str:
+    def _run_simple_assembly(self, agent_config: dict, variables: dict, agent_name: str) -> str:
         """
         Builds the prompt from a sequence of assembly steps.
 
         Args:
             agent_config: The configuration for the specific agent.
             variables: The resolved variables for the agent.
+            agent_name: The name of the agent being composed.
 
         Returns:
             The fully assembled prompt as a string.
@@ -158,7 +162,7 @@ class PromptComposer:
                     continue
                 
                 resolved_path = self._substitute_variables(str(path_from_vars), variables)
-                file_content = self._read_file_content(resolved_path)
+                file_content = self._read_file_content(resolved_path, agent_name)
                 
                 if substitute_in_includes:
                     substituted_content = self._substitute_variables(file_content, variables)
@@ -174,7 +178,7 @@ class PromptComposer:
                     continue
                 
                 resolved_path = self._substitute_variables(str(path_from_vars), variables)
-                file_content = self._read_file_content(resolved_path)
+                file_content = self._read_file_content(resolved_path, agent_name)
                 parts.append(file_content) # Append raw content
             
             else:
@@ -192,6 +196,21 @@ class PromptComposer:
         
         return "\n\n".join(p.strip() for p in parts if p)
 
+    def get_reverse_dependencies(self) -> Dict[Path, List[str]]:
+        """
+        Generates a reverse mapping from file paths to agent names that depend on them.
+
+        Returns:
+            A dictionary where keys are file paths and values are lists of agent names.
+        """
+        reverse_deps: Dict[Path, List[str]] = {}
+        for agent_name, file_paths in self.dependencies.items():
+            for file_path in file_paths:
+                if file_path not in reverse_deps:
+                    reverse_deps[file_path] = []
+                reverse_deps[file_path].append(agent_name)
+        return reverse_deps
+
     def compose_agent(self, agent_name: str) -> None:
         """
         Composes and saves the prompt for a single agent.
@@ -203,6 +222,9 @@ class PromptComposer:
         if not agent_config:
             ui.error(f"Agent '{agent_name}' not found in configuration.")
             raise PromptScribeError(f"Agent '{agent_name}' not found in configuration.")
+
+        # Initialize/clear the dependency set for this agent
+        self.dependencies[agent_name] = {self.config_path}
 
         ui.title(f"Composing agent: '{agent_name}'")
 
@@ -217,7 +239,7 @@ class PromptComposer:
         if 'assembly' in agent_config:
             # Simple Assembly Mode
             ui.info("Using simple assembly mode.")
-            final_prompt = self._run_simple_assembly(agent_config, variables)
+            final_prompt = self._run_simple_assembly(agent_config, variables, agent_name)
         
         else:
             # Jinja2 Mode (default)
@@ -254,15 +276,19 @@ class PromptComposer:
                 Reads a file and substitutes ${VAR} style variables, depending on the
                 'substitute_in_included_files' setting.
                 """
-                file_content = self._read_file_content(path)
+                file_content = self._read_file_content(path, agent_name)
                 if substitute_in_includes:
                     return self._substitute_variables(file_content, variables)
                 return file_content
 
             env.globals['read_file'] = read_file_and_substitute
-            env.globals['read_file_raw'] = self._read_file_content
+            env.globals['read_file_raw'] = lambda path: self._read_file_content(path, agent_name)
             
             try:
+                # Register the template file itself as a dependency to ensure changes are tracked.
+                template_path = templates_dir / template_name
+                self.dependencies[agent_name].add(template_path.resolve())
+
                 template = env.get_template(template_name)
                 final_prompt = template.render(variables)
             except jinja2.TemplateNotFound:
