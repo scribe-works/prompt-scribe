@@ -21,6 +21,11 @@ from .ui import ui
 MAX_SUBSTITUTION_DEPTH = 10
 
 
+class PromptScribeError(Exception):
+    """Custom exception for errors originating from Prompt Scribe composer."""
+    pass
+
+
 class PromptComposer:
     """Orchestrates the prompt composition process."""
 
@@ -33,7 +38,7 @@ class PromptComposer:
         """
         self.config_path = Path(config_path).resolve()
         if not self.config_path.exists():
-            raise FileNotFoundError(f"Configuration file not found at '{self.config_path}'")
+            raise PromptScribeError(f"Configuration file not found at '{self.config_path}'")
         self.base_dir = self.config_path.parent
         self.config = self._load_config()
 
@@ -45,10 +50,10 @@ class PromptComposer:
                 return yaml.safe_load(f)
         except yaml.YAMLError as e:
             ui.error(f"Error parsing YAML file: {e}")
-            raise
+            raise PromptScribeError(f"Error parsing YAML file: {e}")
         except Exception as e:
             ui.error(f"Failed to read config file: {e}")
-            raise
+            raise PromptScribeError(f"Failed to read config file: {e}")
 
     def get_all_agent_names(self) -> List[str]:
         """Returns a list of all configured agent names."""
@@ -71,7 +76,7 @@ class PromptComposer:
             return "" # Return empty string if file not found
         except Exception as e:
             ui.error(f"Failed to read file '{file_path_str}': {e}")
-            raise
+            raise PromptScribeError(f"Failed to read file '{file_path_str}': {e}")
 
     def _resolve_variables(self, agent_name: str) -> Dict[str, Any]:
         """
@@ -105,7 +110,7 @@ class PromptComposer:
             Text with placeholders replaced by their values.
         """
         if depth > MAX_SUBSTITUTION_DEPTH:
-            raise RecursionError("Maximum variable substitution depth exceeded. Check for circular references.")
+            raise PromptScribeError("Maximum variable substitution depth exceeded. Check for circular references.")
 
         # Regex to find ${VAR_NAME} with standard variable name characters.
         pattern = re.compile(r'\${([a-zA-Z0-9_]+)}')
@@ -116,7 +121,7 @@ class PromptComposer:
                 value = variables[var_name]
                 # Recursively substitute variables within the value itself
                 return self._substitute_variables(str(value), variables, depth + 1)
-            ui.warning(f"Variable '${var_name}' found in text but not in config. Leaving it untouched.")
+            ui.warning(f"Variable '{var_name}' found in text but not in config. Leaving it untouched.")
             return match.group(0)
 
         return pattern.sub(replacer, text)
@@ -134,6 +139,8 @@ class PromptComposer:
         """
         parts = []
         assembly_steps = agent_config.get('assembly', [])
+        
+        substitute_in_includes = self.config.get("settings", {}).get("substitute_in_included_files", True)
 
         for step in assembly_steps:
             if not isinstance(step, dict) or not step:
@@ -145,19 +152,30 @@ class PromptComposer:
             key, value = next(iter(step.items()))
             
             if key == 'include':
-                # For 'include', the value is the NAME of a variable that holds the path.
                 path_from_vars = variables.get(str(value))
                 if not path_from_vars:
                     ui.warning(f"In 'include' step, variable '{value}' not found or is empty.")
                     continue
                 
-                # The path itself might contain variables, so substitute them.
                 resolved_path = self._substitute_variables(str(path_from_vars), variables)
                 file_content = self._read_file_content(resolved_path)
                 
-                # The content of the included file can also contain variables.
-                substituted_content = self._substitute_variables(file_content, variables)
-                parts.append(substituted_content)
+                if substitute_in_includes:
+                    substituted_content = self._substitute_variables(file_content, variables)
+                    parts.append(substituted_content)
+                else:
+                    parts.append(file_content)
+
+            elif key == 'include_raw':
+                # For 'include_raw', we do the same as include but DO NOT substitute variables in the file content.
+                path_from_vars = variables.get(str(value))
+                if not path_from_vars:
+                    ui.warning(f"In 'include_raw' step, variable '{value}' not found or is empty.")
+                    continue
+                
+                resolved_path = self._substitute_variables(str(path_from_vars), variables)
+                file_content = self._read_file_content(resolved_path)
+                parts.append(file_content) # Append raw content
             
             else:
                 # For all other keys ('content', 'h2', 'separator'), the value is a string
@@ -174,10 +192,6 @@ class PromptComposer:
         
         return "\n\n".join(p.strip() for p in parts if p)
 
-    def _read_file_for_jinja(self, path: str) -> str:
-        """Wrapper for _read_file_content to be used inside the Jinja2 environment."""
-        return self._read_file_content(path)
-
     def compose_agent(self, agent_name: str) -> None:
         """
         Composes and saves the prompt for a single agent.
@@ -188,7 +202,7 @@ class PromptComposer:
         agent_config = self.config.get("agents", {}).get(agent_name)
         if not agent_config:
             ui.error(f"Agent '{agent_name}' not found in configuration.")
-            return
+            raise PromptScribeError(f"Agent '{agent_name}' not found in configuration.")
 
         ui.title(f"Composing agent: '{agent_name}'")
 
@@ -222,7 +236,7 @@ class PromptComposer:
                 ui.info(f"Using global template: '{template_name}'")
             else:
                 ui.error(f"Agent '{agent_name}' is in template mode but no local or global template is defined.")
-                return
+                raise PromptScribeError(f"Agent '{agent_name}' is in template mode but no local or global template is defined.")
 
             # Setup Jinja environment
             templates_dir_str = settings.get("templates_dir", "templates")
@@ -232,17 +246,31 @@ class PromptComposer:
                 loader=jinja2.FileSystemLoader(searchpath=str(templates_dir)),
                 autoescape=False
             )
-            env.globals['read_file'] = self._read_file_for_jinja
+
+            substitute_in_includes = settings.get("substitute_in_included_files", True)
+
+            def read_file_and_substitute(path: str) -> str:
+                """
+                Reads a file and substitutes ${VAR} style variables, depending on the
+                'substitute_in_included_files' setting.
+                """
+                file_content = self._read_file_content(path)
+                if substitute_in_includes:
+                    return self._substitute_variables(file_content, variables)
+                return file_content
+
+            env.globals['read_file'] = read_file_and_substitute
+            env.globals['read_file_raw'] = self._read_file_content
             
             try:
                 template = env.get_template(template_name)
                 final_prompt = template.render(variables)
             except jinja2.TemplateNotFound:
                 ui.error(f"Jinja2 template '{template_name}' not found in '{templates_dir}'.")
-                return
+                raise PromptScribeError(f"Jinja2 template '{template_name}' not found in '{templates_dir}'.")
             except Exception as e:
                 ui.error(f"Error rendering Jinja2 template: {e}")
-                return
+                raise PromptScribeError(f"Error rendering Jinja2 template: {e}")
 
         # 3. Determine output file path and save
         output_dir_str = settings.get("output_dir", "composed_prompts")

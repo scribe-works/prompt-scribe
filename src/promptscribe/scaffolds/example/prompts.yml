@@ -6,6 +6,9 @@ settings:
   templates_dir: "templates"
   # A global template to be used by agents that don't specify their own.
   template: "master.jinja2"
+  # Controls whether variables (${VAR}) are substituted in files included via 'include'
+  # or 'read_file' (in Jinja2). Set to 'false' to include raw file content.
+  substitute_in_included_files: true
 
 # Global variables available to all agents.
 # These can be overridden by agent-specific variables.

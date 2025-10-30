@@ -21,7 +21,7 @@ Any code review that identifies a deviation from these rules must mark it as req
 -   **Technical Debt:** Use `TODO` or `FIXME` markers sparingly. Each marker must be justified and ideally linked to an issue in the project's issue tracker.
 
 -   **Strict Prohibition of BBCode in UI Calls:**
-    -   **Rule:** **Under no circumstances** should BBCode tags (`[tag]...[/tag]`) be used to style variables in strings passed to the `ui` module (e.g., `ui.success('File [bold]${filename}[/bold] saved')`).
+    -   **Rule:** **Under no circumstances** should BBCode tags (`[tag]...[/tag]`) be used to style variables in strings passed to the `ui` module (e.g., `ui.success('File [bold]{filename}[/bold] saved')`).
     -   **Rationale (CRITICAL):** This is a critical architectural violation. The `ui.py` module is intentionally designed with an **automatic variable highlighting system** that styles quoted strings. Manual BBCode styling bypasses this system, creates inconsistent output, and pollutes the calling code, defeating the core purpose of the UI module. Adherence to this rule is non-negotiable.
 
 ## 4. Testing

@@ -18,7 +18,7 @@ from typing_extensions import Annotated
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from .composer import PromptComposer
+from .composer import PromptComposer, PromptScribeError
 from .ui import ui
 
 app = typer.Typer(
@@ -39,12 +39,48 @@ def init(
         "-f",
         help="Overwrite existing files if the directory is not empty.",
         rich_help_panel="Customization",
+    ),
+    scaffold: str = typer.Option(
+        "default", 
+        "--scaffold", 
+        "-s",
+        help="The project scaffold to use (e.g., 'default', 'example', 'dev-kit'). Use --list-scaffolds to see all available options.",
+        rich_help_panel="Customization",
+    ),
+    list_scaffolds: bool = typer.Option(
+        False,
+        "--list-scaffolds",
+        help="List all available scaffolds and exit.",
+        rich_help_panel="Customization",
     )
 ):
     """
-    Initializes a new Prompt Scribe project with a default structure.
+    Initializes a new Prompt Scribe project with a specified scaffold structure.
     """
-    ui.title("Initializing Prompt Scribe project structure...")
+    # Discover available scaffolds dynamically
+    scaffolds_path = resources.files("promptscribe") / "scaffolds"
+    available_scaffolds = []
+    if scaffolds_path.is_dir():
+        for item in scaffolds_path.iterdir():
+            if item.is_dir():
+                available_scaffolds.append(item.name)
+    
+    # If user wants to list scaffolds, show them and exit
+    if list_scaffolds:
+        if available_scaffolds:
+            ui.title("Available scaffolds:")
+            for scaffold_name in available_scaffolds:
+                print(f"  - {scaffold_name}")
+        else:
+            ui.info("No scaffolds found.")
+        return
+
+    # Validate scaffold option
+    if scaffold not in available_scaffolds:
+        ui.error(f"Unknown scaffold '{scaffold}'. Available scaffolds: {available_scaffolds}")
+        raise typer.Exit(code=1)
+    
+    ui.title(f"Initializing Prompt Scribe project using '{scaffold}' scaffold...")
     
     base_path = path.resolve()
     
@@ -59,35 +95,41 @@ def init(
     
     project_path.mkdir(exist_ok=True)
     
-    # Create subdirectories unconditionally
-    dirs = ["personas", "includes", "templates", "composed_prompts"]
+    # Create standard directories unconditionally for all scaffolds
+    dirs = ["personas", "includes", "templates"]
     for d in dirs:
         (project_path / d).mkdir(exist_ok=True)
-        
-    # Copy template files from the package
-    template_files_path = resources.files("promptscribe") / "project_template"
     
-    files_to_copy = {
-        "prompts.yml": "prompts.yml",
-        "master.jinja2": "templates/master.jinja2",
-        "report.jinja2": "templates/report.jinja2",
-        "code-reviewer.md": "personas/code-reviewer.md",
-        "development-rules.md": "includes/development-rules.md",
-        "source-data.json": "includes/source-data.json",
-    }
+    # Copy template files from the specified scaffold
+    scaffold_path = resources.files("promptscribe") / "scaffolds" / scaffold
     
-    for source_name, dest_name in files_to_copy.items():
-        dest_path = project_path / dest_name
-        
-        if dest_path.exists() and not force:
-            ui.info(f"Skipping existing file: {dest_path.relative_to(Path.cwd())}")
-            continue
+    # If the scaffold directory exists, copy all its contents recursively
+    if (scaffold_path).is_dir():
+        # Copy all scaffold contents to the target project directory
+        scaffold_source = scaffold_path
+        for item in scaffold_source.rglob("*"):
+            if item.is_file():
+                # Calculate the relative path from the scaffold directory
+                rel_path = item.relative_to(scaffold_source)
+                dest_path = project_path / rel_path
+                
+                # Check if destination file already exists
+                if dest_path.exists() and not force:
+                    ui.info(f"Skipping existing file: {dest_path.relative_to(Path.cwd())}")
+                    continue
+                
+                # Ensure parent directory exists
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Copy file content
+                source_content = item.read_text(encoding="utf-8")
+                dest_path.write_text(source_content, encoding="utf-8")
+    else:
+        # Fallback to old behavior for backward compatibility if needed
+        ui.error(f"Scaffold '{scaffold}' not found.")
+        raise typer.Exit(code=1)
 
-        source_content = (template_files_path / source_name).read_text(encoding="utf-8")
-        dest_path.parent.mkdir(exist_ok=True) # Ensure parent dir exists
-        dest_path.write_text(source_content, encoding="utf-8")
-
-    ui.success(f"Project initialized at '{project_path}'")
+    ui.success(f"Project initialized at '{project_path}' using '{scaffold}' scaffold")
     ui.info(f"Next steps: customize '{project_path / 'prompts.yml'}' and run 'prompt-scribe compose'")
 
 
@@ -101,10 +143,9 @@ def _compose_agents(composer: PromptComposer, agent_names: List[str]):
     for agent_name in target_agents:
         try:
             composer.compose_agent(agent_name)
-        except Exception:
-            # Errors are already printed by the composer, continue to next agent
-            ui.error(f"Failed to compose agent '{agent_name}'. Please check the error messages above.")
-            pass
+        except PromptScribeError as e:
+            ui.error(f"Error composing agent '{agent_name}': {e}")
+            raise typer.Exit(1)
 
 
 class ChangeHandler(FileSystemEventHandler):

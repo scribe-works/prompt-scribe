@@ -1,0 +1,31 @@
+# Global settings for all agents
+settings:
+  # The output directory for the composed prompts.
+  output_dir: "composed_prompts"
+  # The directory where Jinja2 templates are located.
+  templates_dir: "templates"
+  # A global template to be used by agents that don't specify their own.
+  # Commented out by default to avoid requiring a template file initially.
+  # template: "master.jinja2"
+  # Controls whether variables (${VAR}) are substituted in files included via 'include'
+  # or 'read_file' (in Jinja2). Set to 'false' to include raw file content.
+  # substitute_in_included_files: true
+
+# Global variables available to all agents.
+# These can be overridden by agent-specific variables.
+variables:
+  # Define your global variables here
+  # project_name: "My Project"
+
+# Agents configuration
+# Define your prompt agents here
+agents:
+  # Example agent - uncomment and modify to create your first agent
+  # my-agent:
+  #   variables:
+  #     # Agent-specific variables
+  #   # You can use either 'assembly' or 'template' mode for each agent
+  #   assembly:
+  #     - content: |
+  #         Your prompt content here
+  #   output_file: "my_agent_output.md"
