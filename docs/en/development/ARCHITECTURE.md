@@ -37,7 +37,7 @@ graph TD
     E -- "No" --> G["Run Jinja2 Mode"];
     G --> G1{"Find template\n(Agent > Global)"};
     G1 --> G2{"Render template with variables\n(read_file() available)"};
-    F --> H["Substitute ${VAR} recursively"];
+    F --> H["Substitute {{ VAR }} recursively"];
     G2 --> I["Final prompt string is generated"];
     H --> I;
     I --> J["Determine output path\n(Smart logic for output_file)"];
@@ -52,7 +52,7 @@ graph TD
 3.  **Mode Selection (The Central Fork):** The composer checks for the presence of the `assembly` key in the agent's configuration.
     *   **If `assembly` exists:** The **Simple Assembly Mode** is activated. The `_run_simple_assembly` method iterates through a list of explicit steps (`content`, `include`, etc.), building the prompt sequentially.
     *   **If `assembly` is absent:** The **Jinja2 Mode** is activated by default. The composer finds the appropriate template (agent-specific `template` key overrides the global `settings.template`) and renders it, passing the entire variable dictionary as context.
-4.  **Recursive Substitution:** In both modes, any value containing a `${VAR}` placeholder is processed by the `_substitute_variables` function. This function recursively replaces variables with their values, including reading file content for variables that are paths. A depth limit prevents infinite loops.
+4.  **Recursive Substitution:** In both modes, any value containing a `{{ VAR }}` placeholder is processed by the `_substitute_variables` function. This function recursively replaces variables with their values, including reading file content for variables that are paths. A depth limit prevents infinite loops.
 5.  **Output Path Calculation:** The final output path is determined. If `output_file` is defined, it is used (as a full path or relative to `output_dir`). If not, a name is generated from the agent's key.
 6.  **File Generation:** The composed prompt string is written to the calculated destination file.
 
@@ -63,7 +63,7 @@ This section documents the "why" behind critical design choices. Any future deve
 *   **Decision: Dual Composition Modes (`assembly` vs. `template`)**
     *   **Rationale:** To cater to two distinct use cases. **Simple Assembly** provides a straightforward, linear, and "what you see is what you get" experience for common scenarios. **Jinja2 Mode** provides maximum power and flexibility for complex prompts that require loops, conditionals, or advanced text manipulation. Making Jinja2 the default for agents without an `assembly` key simplifies configuration for power users.
 
-*   **Decision: Recursive `${VAR}` Substitution**
+*   **Decision: Recursive `{{ VAR }}` Substitution**
     *   **Rationale:** To enable a fully declarative and DRY (Don't Repeat Yourself) configuration. Users can define a value once (like a file path) and reference it anywhere, including within other files. This is the core of the tool's flexibility.
 
 *   **Decision: `read_file()` Function in Jinja2 Environment**

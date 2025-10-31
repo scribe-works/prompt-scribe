@@ -6,9 +6,12 @@ settings:
   templates_dir: "templates"
   # A global template to be used by agents that don't specify their own.
   template: "master.jinja2"
-  # Controls whether variables (${VAR}) are substituted in files included via 'include'
+  # Controls whether variables ({{ VAR }}) are substituted in files included via 'include'
   # or 'read_file' (in Jinja2). Set to 'false' to include raw file content.
   substitute_in_included_files: true
+  # Controls whether warnings are shown for variables that are referenced but not defined.
+  # Can be overridden per agent. Default is true (warnings enabled).
+  warn_on_missing_variables: true
 
 # Global variables available to all agents.
 # These can be overridden by agent-specific variables.
@@ -32,7 +35,7 @@ agents:
       - separator: "---"
       # 2. You can also have inline content with variable substitution.
       - content: |
-          You are a senior AI developer for the `${project_name}` project.
+          You are a senior AI developer for the `{{ project_name }}` project.
           Your main task is to provide a thorough and constructive code review.
       - separator: "---"
       # 3. Use headers and include other files.

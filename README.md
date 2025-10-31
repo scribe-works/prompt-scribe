@@ -26,7 +26,7 @@ Managing large, multi-part prompts for Large Language Models can be messy. You o
 -   **Two Composition Modes:**
     -   **Simple Assembly:** Sequentially build prompts from content blocks, file includes, and headers.
     -   **Jinja2 Templating:** Use the full power of Jinja2 for complex logic and transformations.
--   **Variable System:** Define global and agent-specific variables with support for overriding and recursive substitution (`${VAR}`).
+-   **Variable System:** Define global and agent-specific variables with support for overriding and recursive substitution (`{{ VAR }}`).
 -   **Safe Initialization:** Creates a dedicated `.prompt_scribe/` directory to avoid cluttering your project root.
 -   **Watch Mode:** Automatically recompose prompts when source files change.
 -   **Beautiful CLI:** A clean, helpful command-line interface.
@@ -121,7 +121,7 @@ agents:
       - separator: "---"
       # 2. You can also have inline content with variable substitution.
       - content: |
-          You are a senior AI developer for the `${project_name}` project.
+          You are a senior AI developer for the `{{ project_name }}` project.
           Your main task is to provide a thorough and constructive code review.
       - separator: "---"
       # 3. Use headers and include other files.
