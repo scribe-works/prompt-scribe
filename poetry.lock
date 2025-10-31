@@ -170,6 +170,21 @@ files = [
 ]
 
 [[package]]
+name = "mdformat"
+version = "1.0.0"
+description = "CommonMark compliant Markdown formatter"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "mdformat-1.0.0-py3-none-any.whl", hash = "sha256:bca015d65a1d063a02e885a91daee303057bc7829c2cd37b2075a50dbb65944b"},
+    {file = "mdformat-1.0.0.tar.gz", hash = "sha256:4954045fcae797c29f86d4ad879e43bb151fa55dbaf74ac6eaeacf1d45bb3928"},
+]
+
+[package.dependencies]
+markdown-it-py = ">=1,<5"
+
+[[package]]
 name = "mdurl"
 version = "0.1.2"
 description = "Markdown URL utilities"
@@ -386,4 +401,4 @@ watchmedo = ["PyYAML (>=3.10)"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.14"
-content-hash = "908f774b608b41ee357a4e13543b7c183b4518bd4b8066153b238ebc6c4fe80e"
+content-hash = "9c61ac81fbfa24a816abcdd284220ea90d8c989809b9d6d565991757fba058c9"

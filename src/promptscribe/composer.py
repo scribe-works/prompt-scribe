@@ -9,12 +9,13 @@ to generate the final prompt files.
 
 @copyright: (c) 2025 by The Scribe Works.
 """
-import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 import jinja2
 import yaml
+from markdown_it import MarkdownIt
+from mdformat.renderer import MDRenderer
 
 from .ui import ui
 
@@ -38,10 +39,16 @@ class PromptComposer:
         """
         self.config_path = Path(config_path).resolve()
         if not self.config_path.exists():
-            raise PromptScribeError(f"Configuration file not found at '{self.config_path}'")
+            raise PromptScribeError(
+                f"Configuration file not found at '{self.config_path}'"
+            )
         self.base_dir = self.config_path.parent
         self.config = self._load_config()
         self.dependencies: Dict[str, set] = {}  # agent -> {file_path}
+
+        # Initialize Markdown tools once for efficiency
+        self.md_parser = MarkdownIt()
+        self.md_renderer = MDRenderer()
 
     def _load_config(self) -> Dict[str, Any]:
         """Loads and validates the main YAML configuration file."""
@@ -67,6 +74,43 @@ class PromptComposer:
             return path
         return (self.base_dir / path).resolve()
 
+    def _process_markdown_content(self, content: str, fit_level: int) -> str:
+        """
+        Analyzes Markdown content, shifts heading levels to fit a target level,
+        and renders it back to a Markdown string.
+
+        Args:
+            content: The Markdown content to process.
+            fit_level: The target level for the highest heading in the content.
+
+        Returns:
+            The processed Markdown content with adjusted headings.
+        """
+        tokens = self.md_parser.parse(content)
+
+        highest_level_found = 7
+        for token in tokens:
+            if token.type == 'heading_open':
+                current_level = int(token.tag[1:])
+                highest_level_found = min(highest_level_found, current_level)
+
+        if highest_level_found == 7:
+            return content
+
+        shift_delta = fit_level - highest_level_found
+        if shift_delta == 0:
+            return content
+
+        for token in tokens:
+            if token.type in ('heading_open', 'heading_close'):
+                current_level = int(token.tag[1:])
+                new_level = min(max(1, current_level + shift_delta), 6)
+                token.tag = f'h{new_level}'
+                if token.markup and (token.markup.startswith('#') or token.markup in ('=', '-')):
+                    token.markup = '#' * new_level
+
+        return self.md_renderer.render(tokens, self.md_parser.options, {})
+
     def _read_file_content(self, file_path_str: str, agent_name: str) -> str:
         """Reads content from a file, handling potential errors and recording dependencies."""
         try:
@@ -76,7 +120,7 @@ class PromptComposer:
             return file_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             ui.warning(f"File not found during substitution: '{file_path_str}'")
-            return "" 
+            return ""
         except Exception as e:
             ui.error(f"Failed to read file '{file_path_str}': {e}")
             raise PromptScribeError(f"Failed to read file '{file_path_str}': {e}")
@@ -96,88 +140,91 @@ class PromptComposer:
         global_vars = self.config.get("variables", {}).copy()
         agent_vars = agent_config.get("variables", {}).copy()
 
-        # 1. Merge basic variables
         merged_vars = {**global_vars, **agent_vars}
-
-        # 2. Inject system variables EARLY so they can be used in other variables
         merged_vars['_agent_name'] = agent_name
-
-        # 3. Inject extra context (like _settings) if provided
         if extra_context:
-            for key, value in extra_context.items():
-                merged_vars[key] = value
+            merged_vars.update(extra_context)
 
-        # 4. Eagerly resolve all string variables.
-        # We use a fresh dictionary for the final resolved values.
-        # We pass 'merged_vars' as context so variables can refer to each other.
         final_vars = {}
         for key, value in merged_vars.items():
             if isinstance(value, str):
-                # Recursively resolve the value using the full merged context
                 final_vars[key] = self._substitute_variables(value, merged_vars)
             else:
                 final_vars[key] = value
 
         return final_vars
 
-    def _substitute_variables(self, text: str, variables: Dict[str, Any], depth: int = 0) -> str:
+    def _get_and_process_file_content(self, path: str, agent_name: str, **kwargs: Any) -> str:
         """
-        Recursively substitutes {{ VAR }} placeholders in the text.
-
-        Args:
-            text: The string to perform substitutions on.
-            variables: A dictionary of available variables.
-            depth: The current recursion depth to prevent infinite loops.
-
-        Returns:
-            Text with placeholders replaced by their values.
+        Core helper to read and apply initial processing to a file's content.
+        This is the single source of truth for file reading logic.
         """
-        if depth > MAX_SUBSTITUTION_DEPTH:
-            raise PromptScribeError("Maximum substitution depth exceeded. Check for circular references.")
+        if not path or not isinstance(path, str):
+            ui.warning("File reader received an invalid or empty path. Skipping.")
+            return ""
+        
+        # Step 1: Read the file content
+        content = self._read_file_content(path, agent_name)
+        
+        # Step 2: Apply heading processing if requested
+        fit_level = kwargs.get('fit_headings')
+        if fit_level is not None:
+            content = self._process_markdown_content(content, int(fit_level))
+            
+        return content
 
-        # CORRECTED REGEX using VERBOSE mode for readability and safety.
-        # It matches either:
-        # 1. include('path') or include_raw('path')
-        # 2. {{ VAR_NAME }}
-        pattern = re.compile(r"""
-            include(?P<raw>_raw)?\((['"])(?P<path>.*?)\2\)|  # Group: include func
-            \{\{\s*(?P<var>[a-zA-Z0-9_]+)\s*\}\}                     # Group: variable
-        """, re.VERBOSE)
+    def _get_jinja_helpers(self, agent_name: str, variables: Dict[str, Any]) -> Dict[str, Callable]:
+        """
+        A factory that creates and returns file reading helper functions
+        for a Jinja2 environment. This centralizes the logic and avoids code duplication.
+        """
+        def read_file_wrapper(path: str, **kwargs: Any) -> str:
+            """Reads, processes, and substitutes variables in a file."""
+            content = self._get_and_process_file_content(path, agent_name, **kwargs)
+            substitute = variables.get('_settings', {}).get('substitute_in_includes', True)
+            if substitute:
+                return self._substitute_variables(content, variables)
+            return content
+        
+        def read_file_raw_wrapper(path: str, **kwargs: Any) -> str:
+            """Reads and processes a file, but skips variable substitution."""
+            return self._get_and_process_file_content(path, agent_name, **kwargs)
 
-        substitute_in_includes = variables.get('_settings', {}).get('substitute_in_includes', True)
+        return {
+            'read_file': read_file_wrapper,
+            'read_file_raw': read_file_raw_wrapper,
+        }
+    
+    def _substitute_variables(self, text: str, variables: Dict[str, Any]) -> str:
+        """
+        Renders a string using a lightweight Jinja2 environment, allowing for
+        consistent variable and function syntax (e.g., {{ my_var }}, {{ read_file(...) }})
+        across all parts of the configuration.
+        """
+        warn_setting = variables.get('_settings', {}).get('warn_on_missing', True)
 
-        def replacer(match):
-            # Case 1: include(...) matched
-            if match.group('path') is not None:
-                is_raw = bool(match.group('raw'))
-                raw_path = match.group('path')
-                
-                # Recursively resolve variables inside the path itself (e.g. include('{{ my_doc }}'))
-                file_path = self._substitute_variables(raw_path, variables, depth + 1)
-                
-                agent_name = variables.get('_agent_name', '')
-                content = self._read_file_content(file_path, agent_name)
+        class WarningUndefined(jinja2.Undefined):
+            """Custom Undefined class to show warnings but not crash."""
+            def __str__(self):
+                # This logic is triggered when Jinja tries to render an undefined variable.
+                if warn_setting:
+                    ui.warning(f"Variable '{self._undefined_name}' found in text but not in config. Leaving it untouched.")
+                # Return the placeholder itself, mimicking the old behavior.
+                return f"{{{{ {self._undefined_name} }}}}"
 
-                if is_raw or not substitute_in_includes:
-                    return content
-                # If not raw, recursively substitute variables inside the included content
-                return self._substitute_variables(content, variables, depth + 1)
+        # Select the handler based on the setting
+        undefined_handler = WarningUndefined if warn_setting else jinja2.Undefined
+        env = jinja2.Environment(undefined=undefined_handler, autoescape=False)
 
-            # Case 2: {{ VAR }} matched
-            elif match.group('var') is not None:
-                var_name = match.group('var')
-                if var_name in variables:
-                    value = variables[var_name]
-                    # Recursively resolve the variable's value
-                    return self._substitute_variables(str(value), variables, depth + 1)
-                # Check the warn_on_missing setting before showing warning
-                if variables.get('_settings', {}).get('warn_on_missing', True):
-                    ui.warning(f"Variable '{var_name}' found in text but not in config. Leaving it untouched.")
-                return match.group(0)
+        helpers = self._get_jinja_helpers(variables.get('_agent_name', ''), variables)
+        env.globals.update(helpers)
 
-            return match.group(0)
-
-        return pattern.sub(replacer, text)
+        try:
+            template = env.from_string(text)
+            return template.render(variables)
+        except Exception as e:
+            ui.error(f"Error during string substitution: {e}")
+            return text  # Return original text on failure
 
     def _run_simple_assembly(self, agent_config: dict, variables: dict, agent_name: str) -> str:
         """
@@ -193,31 +240,43 @@ class PromptComposer:
         """
         parts = []
         assembly_steps = agent_config.get('assembly', [])
-        substitute_in_includes = variables.get('_settings', {}).get('substitute_in_includes', True)
 
         for step in assembly_steps:
             if not isinstance(step, dict) or not step:
                 continue
-            
             key, value = next(iter(step.items()))
-            
-            # Explicit 'include' key support (legacy but useful for clarity)
+
             if key == 'include' or key == 'include_raw':
-                # Resolve the path (it might be a variable like '{{ rules }}')
-                resolved_path = self._substitute_variables(str(value), variables)
-                file_content = self._read_file_content(resolved_path, agent_name)
+                path, fit_level = "", None
+                is_raw = (key == 'include_raw')
+
+                if isinstance(value, dict):
+                    path = value.get('path', '')
+                    if not is_raw and (fit_level_val := value.get('fit_headings')):
+                        fit_level = int(fit_level_val)
+                elif isinstance(value, str):
+                    path = value
+                else:
+                    ui.warning(f"Skipping invalid include step: {step}")
+                    continue
                 
-                if key == 'include' and substitute_in_includes:
+                if not path:
+                    ui.warning(f"Skipping include step with empty path: {step}")
+                    continue
+                
+                resolved_path = self._substitute_variables(path, variables)
+                file_content = self._read_file_content(resolved_path, agent_name)
+
+                if fit_level is not None:
+                    file_content = self._process_markdown_content(file_content, fit_level)
+
+                if not is_raw and variables.get('_settings', {}).get('substitute_in_includes', True):
                     parts.append(self._substitute_variables(file_content, variables))
                 else:
                     parts.append(file_content)
-
-            # 'content', 'separator', 'h1'...'h6' support
             else:
-                # Everything else goes through generic substitution.
-                # This enables include('...') inside 'content' automatically.
+                # All other keys (content, h1, etc.) are processed by the Jinja-powered substituter
                 processed_value = self._substitute_variables(str(value), variables)
-
                 if key == 'content':
                     parts.append(processed_value)
                 elif key == 'separator':
@@ -225,7 +284,7 @@ class PromptComposer:
                 elif key.startswith('h') and key[1:].isdigit():
                     level = int(key[1:])
                     parts.append(f"{'#' * level} {processed_value}")
-        
+
         return "\n\n".join(p.strip() for p in parts if p)
 
     def get_reverse_dependencies(self) -> Dict[Path, List[str]]:
@@ -258,60 +317,39 @@ class PromptComposer:
         self.dependencies[agent_name] = {self.config_path}
         ui.title(f"Composing agent: '{agent_name}'")
 
-        # Determine if warnings should be shown for this agent (global > local)
         settings = self.config.get("settings", {})
-        warn_setting = agent_config.get(
-            'warn_on_missing_variables', 
-            settings.get('warn_on_missing_variables', True)
-        )
-        
-        # Determine if variable substitution should happen in included files for this agent (global > local)
-        substitute_in_includes_setting = agent_config.get(
-            'substitute_in_included_files', 
-            settings.get('substitute_in_included_files', True)
-        )
-        
-        # Prepare extra context with settings for _resolve_variables
         extra_context = {
             '_settings': {
-                'warn_on_missing': warn_setting,
-                'substitute_in_includes': substitute_in_includes_setting
+                'warn_on_missing': agent_config.get(
+                    'warn_on_missing_variables', settings.get('warn_on_missing_variables', True)
+                ),
+                'substitute_in_includes': agent_config.get(
+                    'substitute_in_included_files', settings.get('substitute_in_included_files', True)
+                )
             }
         }
-        
-        # 1. Resolve variables (now includes _agent_name and settings for substitution)
         variables = self._resolve_variables(agent_name, extra_context)
-        
         final_prompt = ""
 
-        # 2. Composition Mode
         if 'assembly' in agent_config:
             ui.info("Using simple assembly mode.")
             final_prompt = self._run_simple_assembly(agent_config, variables, agent_name)
         else:
             ui.info("Using Jinja2 template mode.")
-            # ... (Jinja2 setup code) ...
-            local_template = agent_config.get('template')
-            global_template = settings.get('template')
-            
-            template_name = ""
-            if local_template:
-                template_name = self._substitute_variables(local_template, variables)
-                ui.info(f"Using agent-specific template: '{template_name}'")
-            elif global_template:
-                template_name = self._substitute_variables(global_template, variables)
-                ui.info(f"Using global template: '{template_name}'")
-            else:
+            template_path_str = agent_config.get('template') or settings.get('template')
+
+            if not template_path_str:
                 ui.error(f"Agent '{agent_name}' missing template definition.")
                 raise PromptScribeError(f"Agent '{agent_name}' missing template.")
+
+            template_name = self._substitute_variables(template_path_str, variables)
+            ui.info(f"Using template: '{template_name}'")
 
             templates_dir = self._resolve_path(settings.get("templates_dir", "templates"))
             env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(templates_dir)), autoescape=False)
             
-            # Jinja2 helpers that match our new internal logic
-            substitute_in_includes = variables.get('_settings', {}).get('substitute_in_includes', True)
-            env.globals['read_file'] = lambda p: self._substitute_variables(self._read_file_content(p, agent_name), variables) if substitute_in_includes else self._read_file_content(p, agent_name)
-            env.globals['read_file_raw'] = lambda p: self._read_file_content(p, agent_name)
+            helpers = self._get_jinja_helpers(agent_name, variables)
+            env.globals.update(helpers)
 
             try:
                 self.dependencies[agent_name].add((templates_dir / template_name).resolve())
@@ -320,18 +358,13 @@ class PromptComposer:
                 ui.error(f"Jinja2 rendering failed: {e}")
                 raise PromptScribeError(f"Jinja2 rendering failed: {e}")
 
-        # 3. Output File Determination (CORRECTED PRIORITY)
-        output_dir = self._resolve_path(self._substitute_variables(settings.get("output_dir", "composed_prompts"), variables))
+        output_dir_template = settings.get("output_dir", "composed_prompts")
+        output_dir = self._resolve_path(self._substitute_variables(output_dir_template, variables))
         
-        # Priority: Local > Global > Default
         output_file_template = agent_config.get('output_file') or settings.get('output_file')
-
         if output_file_template:
             output_file_name = self._substitute_variables(output_file_template, variables)
-            if '/' in output_file_name or '\\' in output_file_name:
-                 output_file_path = self._resolve_path(output_file_name)
-            else:
-                 output_file_path = output_dir / output_file_name
+            output_file_path = self._resolve_path(output_file_name) if ('/' in output_file_name or '\\' in output_file_name) else (output_dir / output_file_name)
         else:
             output_file_path = output_dir / f"{agent_name}.md"
 
