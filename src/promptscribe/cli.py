@@ -8,10 +8,14 @@ composing prompts, and watching for file changes.
 
 @copyright: (c) 2025 by The Scribe Works.
 """
+import os
+import sys
+import queue
 import time
 from importlib import resources
 from pathlib import Path
 from typing import List
+from contextlib import contextmanager
 
 import typer
 from typing_extensions import Annotated
@@ -151,92 +155,166 @@ def _compose_agents(composer: PromptComposer, agent_names: List[str]):
 class ChangeHandler(FileSystemEventHandler):
     """Handles file system events and triggers recomposition."""
 
-    def __init__(self, composer: PromptComposer, agent_names: List[str]):
+    def __init__(self, composer: PromptComposer, agent_names: List[str], restart_queue: queue.Queue):
         self.composer = composer
         self.agent_names = agent_names
-        settings = self.composer.config.get("settings", {})
-        output_dir_str = settings.get("output_dir", "composed_prompts")
-        self.output_path = self.composer._resolve_path(output_dir_str)
-        self.reverse_dependencies = self.composer.get_reverse_dependencies()
+        self.reverse_dependencies = composer.get_reverse_dependencies()
+        self.restart_queue = restart_queue
         
-        # Debouncing mechanism to prevent multiple rapid recomposition triggers
+        # Debouncing mechanism
         self.last_event_time = 0
         self.debounce_interval = 0.5  # seconds
     
     def on_any_event(self, event):
         current_time = time.time()
         if (current_time - self.last_event_time) < self.debounce_interval:
-            return # Ignore event if it's too soon after the last one
+            return
         self.last_event_time = current_time
 
         if event.is_directory or event.event_type not in ['modified', 'created', 'deleted']:
             return
         
-        # CRITICAL: Ignore events happening inside the output directory
         src_path = Path(event.src_path).resolve()
-        if src_path.is_relative_to(self.output_path):
+        
+        # Ignore events in the output directory
+        settings = self.composer.config.get("settings", {})
+        output_dir_str = settings.get("output_dir", "composed_prompts")
+        output_path = self.composer._resolve_path(output_dir_str)
+        if src_path.is_relative_to(output_path):
             return
 
-        ui.info(f"Change detected in '{src_path.relative_to(Path.cwd())}'. Recomposing...")
+        ui.info(f"Change detected in '{src_path.relative_to(Path.cwd())}'.")
+
         try:
             if src_path == self.composer.config_path:
-                ui.info("prompts.yml changed. Analyzing for selective recomposition.")
-                
-                # 1. Запоминаем старый конфиг
-                old_config = self.composer.config 
-
-                # 2. Загружаем новый и создаем новый композитор
-                fresh_composer = PromptComposer(str(self.composer.config_path))
-                new_config = fresh_composer.config
-
-                # 3. Определяем, что пересобирать
-                agents_to_rebuild = set()
-
-                # 4. Анализ изменений
-                # Сначала проверяем глобальные изменения, которые требуют полной пересборки
-                if old_config.get('settings') != new_config.get('settings') or \
-                   old_config.get('variables') != new_config.get('variables'):
-                    
-                    ui.info("Global settings or variables changed. Recomposing all agents.")
-                    agents_to_rebuild = set(fresh_composer.get_all_agent_names())
-
-                else:
-                    # Если глобальные секции не тронуты, ищем изменения в агентах
-                    old_agents = old_config.get('agents', {})
-                    new_agents = new_config.get('agents', {})
-                    
-                    # Находим всех агентов, которые были добавлены, удалены или изменены
-                    all_agent_keys = set(old_agents.keys()) | set(new_agents.keys())
-                    
-                    for agent_name in all_agent_keys:
-                        if old_agents.get(agent_name) != new_agents.get(agent_name):
-                            agents_to_rebuild.add(agent_name)
-                    
-                    if agents_to_rebuild:
-                        ui.info(f"Detected changes in agents: {', '.join(agents_to_rebuild)}. Recomposing them.")
-                    else:
-                        ui.info("No effective changes detected in agent configurations.")
-
-                # 5. Выполняем пересборку
-                if agents_to_rebuild:
-                    _compose_agents(fresh_composer, list(agents_to_rebuild))
-
-                # 6. Обновляем состояние
-                self.reverse_dependencies = fresh_composer.get_reverse_dependencies()
-                self.composer = fresh_composer
-
+                self.handle_config_change()
             else:
-                affected_agents = self.reverse_dependencies.get(src_path)
-                if affected_agents:
-                    ui.info(f"Recomposing affected agents: {', '.join(affected_agents)}")
-                    # Re-create composer to reload the config if it changed (e.g., variables in prompts.yml)
-                    fresh_composer = PromptComposer(str(self.composer.config_path))
-                    _compose_agents(fresh_composer, affected_agents)
-                    # No need to update reverse_dependencies or self.composer here, as prompts.yml didn't change
-                else:
-                    ui.info(f"No agents depend on '{src_path.relative_to(Path.cwd())}'. Skipping recomposition.")
+                self.handle_dependency_change(src_path)
         except Exception as e:
             ui.error(f"An error occurred during recomposition: {e}")
+
+    def handle_dependency_change(self, src_path: Path):
+        """Handle changes in included files, templates, etc."""
+        affected_agents = self.reverse_dependencies.get(src_path)
+        if affected_agents:
+            ui.info(f"Recomposing affected agents: {', '.join(affected_agents)}")
+            # Reload config to catch potential variable changes that affect includes
+            fresh_composer = PromptComposer(str(self.composer.config_path))
+            _compose_agents(fresh_composer, affected_agents)
+        else:
+            # If the file is not a direct dependency, just ignore it.
+            # This prevents unnecessary recomposition.
+            ui.info(f"Change in '{src_path.relative_to(Path.cwd())}' does not affect any known agents. Skipping.")
+
+
+    def handle_config_change(self):
+        """Handle changes in the main prompts.yml file."""
+        ui.info("Configuration file changed. Analyzing changes...")
+
+        # 1. Get current watch paths
+        old_deps = self.composer.get_all_dependencies()
+        old_watch_dirs = {p.parent for p in old_deps}
+
+        # 2. Create a new composer and analyze new dependencies
+        fresh_composer = PromptComposer(str(self.composer.config_path))
+
+        with suppress_stdout():
+            fresh_composer.analyze_dependencies()
+        
+        new_deps = fresh_composer.get_all_dependencies()
+        new_watch_dirs = {p.parent for p in new_deps}
+
+        # First, determine what needs to be rebuilt, regardless of whether paths change
+        agents_to_rebuild = self.find_changed_agents(self.composer.config, fresh_composer.config)
+        
+        if agents_to_rebuild:
+            ui.info(f"Recomposing agents affected by config change: {', '.join(agents_to_rebuild)}")
+            _compose_agents(fresh_composer, list(agents_to_rebuild))
+        else:
+            ui.info("No effective changes detected in agent configurations.")
+
+        # 3. Compare watch paths AND ONLY THEN decide if the watcher needs to be restarted
+        if old_watch_dirs != new_watch_dirs:
+            ui.info("Watch paths have changed. Signaling for watcher restart.")
+            self.restart_queue.put(fresh_composer)
+        else:
+            # If paths haven't changed, just update the handler's state
+            ui.info("Watch paths remain the same.")
+            self.composer = fresh_composer
+            self.reverse_dependencies = fresh_composer.get_reverse_dependencies()
+
+    def find_changed_agents(self, old_config: dict, new_config: dict) -> set:
+        """Compares two config dictionaries to find which agents need rebuilding."""
+        agents_to_rebuild = set()
+        
+        # Global changes trigger a full rebuild of all relevant agents
+        if old_config.get('settings') != new_config.get('settings') or \
+           old_config.get('variables') != new_config.get('variables'):
+            ui.info("Global settings or variables changed. Rebuilding all specified agents.")
+            return set(self.agent_names or new_config.get("agents", {}).keys())
+
+        # Agent-specific changes
+        old_agents = old_config.get('agents', {})
+        new_agents = new_config.get('agents', {})
+        all_agent_keys = set(old_agents.keys()) | set(new_agents.keys())
+        
+        for name in all_agent_keys:
+            # If specific agents were requested, only check them
+            if self.agent_names and name not in self.agent_names:
+                continue
+            if old_agents.get(name) != new_agents.get(name):
+                agents_to_rebuild.add(name)
+        
+        return agents_to_rebuild
+
+
+def _run_watcher(composer: PromptComposer, agent_names: List[str]):
+    """Sets up and runs a SINGLE watcher instance.
+    Returns a new composer instance if a restart is needed, otherwise None.
+    """
+    restart_queue = queue.Queue()
+    dependencies = composer.get_all_dependencies()
+    watch_paths = {p.parent for p in dependencies}
+
+    handler = ChangeHandler(composer, agent_names, restart_queue)
+    observer = Observer()
+    
+    if not watch_paths:
+        ui.warning("No dependencies found to watch. Watching only the config file's directory.")
+        watch_paths.add(composer.base_dir)
+
+    for path in watch_paths:
+        observer.schedule(handler, str(path), recursive=True)
+    
+    observer.start()
+    ui.info(f"Watching for changes in {len(watch_paths)} directories... Press Ctrl+C to stop.")
+    try:
+        # Block until a restart is signaled
+        new_composer = restart_queue.get()
+        
+        ui.info("Signaled for watcher restart...")
+        return new_composer  # Return the new composer to the controlling loop
+
+    except KeyboardInterrupt:
+        ui.info("Stopping watcher...")
+        return None  # Signal to the controlling loop to exit
+    finally:
+        if observer.is_alive():
+            observer.stop()
+            observer.join()
+        ui.info("Watcher stopped.")
+
+
+@contextmanager
+def suppress_stdout():
+    """A context manager that redirects stdout to devnull using UTF-8 encoding."""
+    original_stdout = sys.stdout
+    with open(os.devnull, 'w', encoding="utf-8") as devnull:
+        sys.stdout = devnull
+        try:
+            yield
+        finally:
+            sys.stdout = original_stdout
 
 
 @app.command()
@@ -267,17 +345,13 @@ def compose(
     _compose_agents(composer, agent_names or [])
 
     if watch:
-        watch_path = composer.base_dir
-        handler = ChangeHandler(composer, agent_names or [])
-        observer = Observer()
-        observer.schedule(handler, str(watch_path), recursive=True)
+        ui.info("Initial dependency analysis for watch mode...")
+        with suppress_stdout():
+            composer.analyze_dependencies()
+
+        current_composer = composer
         
-        observer.start()
-        ui.info(f"Watching for changes in '{watch_path}'... Press Ctrl+C to stop.")
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            observer.stop()
-        observer.join()
-        ui.info("Watcher stopped.")
+        while current_composer:
+            current_composer = _run_watcher(current_composer, agent_names or [])
+        
+        ui.info("Watcher process finished.")

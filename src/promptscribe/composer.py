@@ -302,12 +302,29 @@ class PromptComposer:
                 reverse_deps[file_path].append(agent_name)
         return reverse_deps
 
-    def compose_agent(self, agent_name: str) -> None:
+    def analyze_dependencies(self) -> None:
+        """Runs a dry run of all agents to populate the dependency map."""
+        for agent_name in self.get_all_agent_names():
+            try:
+                self.compose_agent(agent_name, dry_run=True)
+            except PromptScribeError as e:
+                # In a dry run, we can tolerate some errors, but we should warn.
+                ui.warning(f"Could not fully analyze dependencies for agent '{agent_name}': {e}")
+
+    def get_all_dependencies(self) -> set[Path]:
+        """Returns a set of all unique file paths that agents depend on."""
+        all_deps = set()
+        for deps in self.dependencies.values():
+            all_deps.update(deps)
+        return all_deps
+
+    def compose_agent(self, agent_name: str, dry_run: bool = False) -> None:
         """
         Composes and saves the prompt for a single agent.
 
         Args:
             agent_name: The name of the agent to compose.
+            dry_run: If True, populates dependencies without writing files.
         """
         agent_config = self.config.get("agents", {}).get(agent_name)
         if not agent_config:
@@ -358,17 +375,18 @@ class PromptComposer:
                 ui.error(f"Jinja2 rendering failed: {e}")
                 raise PromptScribeError(f"Jinja2 rendering failed: {e}")
 
-        output_dir_template = settings.get("output_dir", "composed_prompts")
-        output_dir = self._resolve_path(self._substitute_variables(output_dir_template, variables))
-        
-        output_file_template = agent_config.get('output_file') or settings.get('output_file')
-        if output_file_template:
-            output_file_name = self._substitute_variables(output_file_template, variables)
-            output_file_path = self._resolve_path(output_file_name) if ('/' in output_file_name or '\\' in output_file_name) else (output_dir / output_file_name)
-        else:
-            output_file_path = output_dir / f"{agent_name}.md"
+        if not dry_run:
+            output_dir_template = settings.get("output_dir", "composed_prompts")
+            output_dir = self._resolve_path(self._substitute_variables(output_dir_template, variables))
+            
+            output_file_template = agent_config.get('output_file') or settings.get('output_file')
+            if output_file_template:
+                output_file_name = self._substitute_variables(output_file_template, variables)
+                output_file_path = self._resolve_path(output_file_name) if ('/' in output_file_name or '\\' in output_file_name) else (output_dir / output_file_name)
+            else:
+                output_file_path = output_dir / f"{agent_name}.md"
 
-        output_file_path.parent.mkdir(parents=True, exist_ok=True)
-        output_file_path.write_text(final_prompt, encoding="utf-8")
+            output_file_path.parent.mkdir(parents=True, exist_ok=True)
+            output_file_path.write_text(final_prompt, encoding="utf-8")
 
-        ui.success(f"Successfully composed prompt for '{agent_name}' -> '{output_file_path.relative_to(Path.cwd())}'")
+            ui.success(f"Successfully composed prompt for '{agent_name}' -> '{output_file_path.relative_to(Path.cwd())}'")

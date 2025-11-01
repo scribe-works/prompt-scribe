@@ -7,7 +7,7 @@ authors = [
 ]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/TheScribeWorks/prompt-scribe"
+repository = "https://github.com/scribe-works/prompt-scribe"
 keywords = ["llm", "ai", "prompt-engineering", "developer-tools", "jinja2", "cli"]
 requires-python = ">=3.14"
 dependencies = [
