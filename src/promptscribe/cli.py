@@ -227,9 +227,14 @@ class ChangeHandler(FileSystemEventHandler):
         # First, determine what needs to be rebuilt, regardless of whether paths change
         agents_to_rebuild = self.find_changed_agents(self.composer.config, fresh_composer.config)
         
-        if agents_to_rebuild:
-            ui.info(f"Recomposing agents affected by config change: {', '.join(agents_to_rebuild)}")
-            _compose_agents(fresh_composer, list(agents_to_rebuild))
+        # Filter out agents that no longer exist in the new configuration.
+        existing_agents_in_new_config = set(fresh_composer.get_all_agent_names())
+        valid_agents_to_rebuild = agents_to_rebuild & existing_agents_in_new_config
+
+        # Use the filtered list to recompose only valid, existing agents.
+        if valid_agents_to_rebuild:
+            ui.info(f"Recomposing agents affected by config change: {', '.join(valid_agents_to_rebuild)}")
+            _compose_agents(fresh_composer, list(valid_agents_to_rebuild))
         else:
             ui.info("No effective changes detected in agent configurations.")
 

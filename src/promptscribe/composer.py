@@ -50,6 +50,27 @@ class PromptComposer:
         self.md_parser = MarkdownIt()
         self.md_renderer = MDRenderer()
 
+        # Substitution context for the shared Jinja environment.
+        # This dictionary will be updated before each substitution call to provide
+        # a file path context to the WarningUndefined handler.
+        self._subst_context = {"file_path": None, "warn": True}
+        
+        # Capture 'self' for use within the nested class, allowing the Undefined handler
+        # to access the composer instance's dynamic context.
+        composer_instance = self
+        class WarningUndefined(jinja2.Undefined):
+            """Custom Undefined class to show contextual warnings but not crash."""
+            def __str__(self):
+                context = composer_instance._subst_context
+                if context["warn"]:
+                    location = f" (in file '{context['file_path']}')" if context['file_path'] else ""
+                    ui.warning(f"Variable '{self._undefined_name}' is not defined in 'prompts.yml'{location}. Leaving it untouched.")
+                return f"{{{{ {self._undefined_name} }}}}"
+        
+        # A single, reusable Jinja2 environment for all string substitutions.
+        # Its 'undefined' handler is configured to use the dynamic context from '_subst_context'.
+        self.subst_env = jinja2.Environment(undefined=WarningUndefined, autoescape=False)
+
     def _load_config(self) -> Dict[str, Any]:
         """Loads and validates the main YAML configuration file."""
         ui.info(f"Loading configuration from '{self.config_path.relative_to(Path.cwd())}'")
@@ -148,7 +169,9 @@ class PromptComposer:
         final_vars = {}
         for key, value in merged_vars.items():
             if isinstance(value, str):
-                final_vars[key] = self._substitute_variables(value, merged_vars)
+                final_vars[key] = self._substitute_variables(
+                    value, merged_vars
+                )
             else:
                 final_vars[key] = value
 
@@ -158,11 +181,7 @@ class PromptComposer:
         """
         Core helper to read and apply initial processing to a file's content.
         This is the single source of truth for file reading logic.
-        """
-        if not path or not isinstance(path, str):
-            ui.warning("File reader received an invalid or empty path. Skipping.")
-            return ""
-        
+        """        
         # Step 1: Read the file content
         content = self._read_file_content(path, agent_name)
         
@@ -180,14 +199,30 @@ class PromptComposer:
         """
         def read_file_wrapper(path: str, **kwargs: Any) -> str:
             """Reads, processes, and substitutes variables in a file."""
+            if isinstance(path, jinja2.Undefined):
+                ui.warning(f"Path variable '{path._undefined_name}' is not defined in 'prompts.yml'. Skipping file read.")
+                return ""
+            
+            if not isinstance(path, str) or not path.strip():
+                ui.warning(f"Invalid path provided to 'read_file': '{path}'. Skipping file read.")
+                return ""
+            
             content = self._get_and_process_file_content(path, agent_name, **kwargs)
             substitute = variables.get('_settings', {}).get('substitute_in_includes', True)
             if substitute:
-                return self._substitute_variables(content, variables)
+                return self._substitute_variables(content, variables, file_path_context=path)
             return content
         
         def read_file_raw_wrapper(path: str, **kwargs: Any) -> str:
             """Reads and processes a file, but skips variable substitution."""
+            if isinstance(path, jinja2.Undefined):
+                ui.warning(f"Path variable '{path._undefined_name}' is not defined in 'prompts.yml'. Skipping file read.")
+                return ""
+            
+            if not isinstance(path, str) or not path.strip():
+                ui.warning(f"Invalid path provided to 'read_file_raw': '{path}'. Skipping file read.")
+                return ""
+               
             return self._get_and_process_file_content(path, agent_name, **kwargs)
 
         return {
@@ -195,34 +230,24 @@ class PromptComposer:
             'read_file_raw': read_file_raw_wrapper,
         }
     
-    def _substitute_variables(self, text: str, variables: Dict[str, Any]) -> str:
+    def _substitute_variables(self, text: str, variables: Dict[str, Any], file_path_context: str = None) -> str:
         """
-        Renders a string using a lightweight Jinja2 environment, allowing for
-        consistent variable and function syntax (e.g., {{ my_var }}, {{ read_file(...) }})
-        across all parts of the configuration.
+        Renders a string using a shared, reusable Jinja2 environment for performance.
+        It allows for consistent variable and function syntax (e.g., {{ my_var }},
+        {{ read_file(...) }}) across all parts of the configuration.
         """
-        warn_setting = variables.get('_settings', {}).get('warn_on_missing', True)
+        # Configure the context for the shared environment's undefined handler
+        self._subst_context["file_path"] = file_path_context
+        self._subst_context["warn"] = variables.get('_settings', {}).get('warn_on_missing', True)
 
-        class WarningUndefined(jinja2.Undefined):
-            """Custom Undefined class to show warnings but not crash."""
-            def __str__(self):
-                # This logic is triggered when Jinja tries to render an undefined variable.
-                if warn_setting:
-                    ui.warning(f"Variable '{self._undefined_name}' found in text but not in config. Leaving it untouched.")
-                # Return the placeholder itself, mimicking the old behavior.
-                return f"{{{{ {self._undefined_name} }}}}"
-
-        # Select the handler based on the setting
-        undefined_handler = WarningUndefined if warn_setting else jinja2.Undefined
-        env = jinja2.Environment(undefined=undefined_handler, autoescape=False)
-
+        # Helpers need to be updated for each call as they depend on the variable context
         helpers = self._get_jinja_helpers(variables.get('_agent_name', ''), variables)
-        env.globals.update(helpers)
+        self.subst_env.globals.update(helpers)
 
         try:
-            template = env.from_string(text)
+            template = self.subst_env.from_string(text)
             return template.render(variables)
-        except Exception as e:
+        except (jinja2.TemplateError, TypeError) as e:
             ui.error(f"Error during string substitution: {e}")
             return text  # Return original text on failure
 
@@ -257,21 +282,29 @@ class PromptComposer:
                 elif isinstance(value, str):
                     path = value
                 else:
-                    ui.warning(f"Skipping invalid include step: {step}")
+                    # ИЗМЕНЕНО: Предупреждение о неверном типе значения
+                    ui.warning(f"Invalid value for '{key}' step: '{value}'. Skipping.")
                     continue
                 
                 if not path:
-                    ui.warning(f"Skipping include step with empty path: {step}")
+                    # ИЗМЕНЕНО: Предупреждение о пустом пути до подстановки
+                    ui.warning(f"Empty path provided to '{key}' step: '{value}'. Skipping.")
                     continue
                 
                 resolved_path = self._substitute_variables(path, variables)
-                file_content = self._read_file_content(resolved_path, agent_name)
+                
+                # ДОБАВЛЕНО: Проверка на случай, если путь стал пустым ПОСЛЕ подстановки
+                if not resolved_path or not resolved_path.strip():
+                    original_path_context = f" (from original path: '{path}')" if path != resolved_path else ""
+                    ui.warning(f"Invalid path provided to '{key}' step{original_path_context}. Skipping.")
+                    continue
 
-                if fit_level is not None:
-                    file_content = self._process_markdown_content(file_content, fit_level)
+                kwargs = {'fit_headings': fit_level} if fit_level is not None else {}
+                file_content = self._get_and_process_file_content(resolved_path, agent_name, **kwargs)
 
                 if not is_raw and variables.get('_settings', {}).get('substitute_in_includes', True):
-                    parts.append(self._substitute_variables(file_content, variables))
+                    # БЕЗ ИЗМЕНЕНИЙ: Использование file_path_context, как в вашем коде
+                    parts.append(self._substitute_variables(file_content, variables, file_path_context=resolved_path))
                 else:
                     parts.append(file_content)
             else:
